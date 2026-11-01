@@ -1580,40 +1580,6 @@ static void render_swarm_face(ht_scene_t *f)
     s.hits[s.hit_count++] = focus_face ? (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true}
                                        : (hit_t){{33, 66, 400, 316}, A_PET, 0, true};
 }
-// desk-dial: the voice entry's own face - a white microphone with orange sound rings that pulse outward, and "New session".
-static unsigned mix_rgb(unsigned from, unsigned to, int pct)
-{
-    unsigned out = 0;
-    for (int k = 0; k < 24; k += 8)
-        out |= (((from >> k & 255u) * (100 - pct) + (to >> k & 255u) * pct + 50) / 100) << k;
-    return out;
-}
-static void render_new_session(ht_scene_t *f)
-{
-    uint32_t t = ms();
-    int radius[3];
-    for (int k = 0; k < 3; k++) radius[k] = 62 + (int)(((t / 14) + k * 40) % 120);   // 62..181, one ring every 40 steps
-    for (int i = 0; i < 2; i++)   // largest first, so each smaller ring sits on top of it
-        for (int k = 0; k < 2 - i; k++)
-            if (radius[k] < radius[k + 1]) { int tmp = radius[k]; radius[k] = radius[k + 1]; radius[k + 1] = tmp; }
-    for (int k = 0; k < 3; k++) {
-        int r = radius[k], fade = (r - 62) * 100 / 120;
-        uint16_t ring = color(mix_rgb(0xD97757, HT_THEME_FOCUS_CANVAS, fade));
-        ht_box(f, 233 - r, 190 - r, 2 * r, 2 * r, r, ring, ring);
-        ht_box(f, 233 - r + 5, 190 - r + 5, 2 * r - 10, 2 * r - 10, r - 5, BG, BG);
-    }
-    ht_box(f, 193, 178, 80, 74, 37, FG, FG);        // the cradle ...
-    ht_box(f, 201, 178, 64, 66, 31, BG, BG);
-    ht_box(f, 186, 150, 94, 44, 0, BG, BG);         // ... open at the top
-    ht_box(f, 213, 146, 40, 84, 20, FG, FG);        // the capsule
-    ht_box(f, 231, 250, 4, 26, 2, FG, FG);          // stem and base
-    ht_box(f, 213, 276, 40, 6, 3, FG, FG);
-    center(f, 322, "New session", FG);
-    center(f, 360, "tap to talk", DIM);
-    s.pet_next_ms = (t + 50) | 1;                   // keep the rings moving
-    s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
-    s.hits[s.hit_count++] = (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true};
-}
 static void render_home(ht_scene_t *f)
 {
     s.caption_arc = (ht_rect_t){0};
@@ -1622,8 +1588,6 @@ static void render_home(ht_scene_t *f)
     if (swarm_mode()) { render_swarm_face(f); return; }
     if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
     agent_t *a = active();
-    if (a && !strcmp(a->id, "desk-dial:voice") && !a->busy && !s.nap && !s.voice_retry_until && !carry.active && !carry.error[0] &&
-        !visit.available && character.id == HT_CHARACTER_FOCUS) { render_new_session(f); return; }
     // The top caption belongs to the current pane; only completed work gets
     // a recap. The bell has its own lower target, outside the voice surface.
     const char *recap = a && !a->busy && a->recap_ready && s.connected && !s.loading &&
@@ -2169,6 +2133,16 @@ static void tab_neighbour(ht_scene_t *f, const char *name, int edge, bool next)
     }
     for (; used < FADE_SLOTS; used++) ht_text(f, 0, LINE_Y, 1, font, BG, BG, "");
 }
+// desk-dial: a small white microphone, drawn above the voice entry's name in the pane picker.
+static void mic_icon(ht_scene_t *f, int cx, int y)
+{
+    ht_box(f, cx - 17, y + 22, 34, 32, 16, FG, FG);          // cradle
+    ht_box(f, cx - 12, y + 22, 24, 26, 11, BG, BG);
+    ht_box(f, cx - 20, y + 4, 40, 28, 0, BG, BG);            // open at the top
+    ht_box(f, cx - 9, y, 18, 38, 9, FG, FG);                 // capsule
+    ht_box(f, cx - 2, y + 54, 4, 10, 2, FG, FG);             // stem and base
+    ht_box(f, cx - 10, y + 63, 20, 4, 2, FG, FG);
+}
 static void focus_carousel(ht_scene_t *f, const ht_tab_carousel_t *c, int count, const char *(*label)(int),
                            action_kind_t pick)
 {
@@ -2185,6 +2159,8 @@ static void focus_carousel(ht_scene_t *f, const ht_tab_carousel_t *c, int count,
         tab_split(name, one, two, sizeof one);
         int lines = two[0] ? 2 : 1, top = lines == 2 ? 181 : 207;     // the design's 52 px lines, centred on 233
         uint16_t ink = s.connected ? color(HT_THEME_VOICE) : DIM;
+        if (pick == A_AGENT && !swarm_mode() && i < s.count && !strcmp(s.agents[i].id, "desk-dial:voice"))
+            mic_icon(f, left + TAB_PAGE / 2, top - 84);
         for (int n = 0; n < 2; n++) {
             if (n >= lines) { ht_text(f, 0, 0, 1, big, BG, BG, ""); continue; }
             ht_fit_width(fit, sizeof fit, n ? two : one, TAB_LINE_W, big);

@@ -1094,16 +1094,40 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
     text_in(f, 40, y, HT_WIDTH - 80, UI_FONT, t, c, true);
 }
 // The wordmark shown while connecting, loading and updating. On Focus it is Inter 36, like every word on the face.
+// Critter: the boot / waiting screen, in place of the stock "Harness" wordmark. A small ASCII critter blinks, looks around and
+// wiggles its legs; a line under it types itself out. ASCII only (the mono fonts have no box-drawing glyphs). One redraw per 250 ms.
 static void render_brand(ht_scene_t *f)
 {
-    if (character.id == HT_CHARACTER_FOCUS) {
-        // The wordmark in Inter Bold 48 on a 50 px line at y 208 (design 2026-10-06, focus-project.html "Connecting").
-        const ht_font_t *font = &ht_lv_inter_bold_48.base;
-        int w = ht_measure(font, "Harness"), base = 208 + 50 / 2 + 48 * 93 / 256;
-        ht_text(f, (HT_WIDTH - w) / 2, base - ht_pfont(font)->ascent, w, font, FG, BG, "Harness");
-        return;
-    }
-    center(f, (466 - UI_FONT->height) / 2, "Harness", FG);
+    static const char *const eyes[8] = {"  O    O  ", "  O    O  ", " O    O   ", "  O    O  ",
+                                        "   O    O ", "  -    -  ", "  O    O  ", "  O    O  "};
+    static const char *const legs[2] = {"   | |  | |   ", "  | |  | |    "};
+    static const char *const waiting[3] = {"waking up", "waiting for the bridge", "plug me in"};
+    static const char *const loading[1] = {"fetching your sessions"};
+    static const char *const updating[1] = {"updating, one moment"};
+    unsigned tick = ms() / 250;
+    uint16_t orange = color(0xD97757);
+    char row[16];
+    const ht_font_t *art = UI_FONT, *small = &ht_mono_20;
+    int x = (HT_WIDTH - ht_measure(art, " .----------. ")) / 2, y = 120;
+    int tw = ht_measure(small, "Critter Harness");
+    ht_text(f, (HT_WIDTH - tw) / 2, 74, tw, small, FG, BG, "Critter Harness");
+    ht_text(f, x, y, ht_measure(art, " .----------. "), art, orange, BG, " .----------. ");
+    snprintf(row, sizeof row, " |%s| ", eyes[(tick / 3) % 8]);
+    ht_text(f, x, y + art->height, ht_measure(art, row), art, orange, BG, row);
+    ht_text(f, x, y + 2 * art->height, ht_measure(art, row), art, orange, BG, " |    __    | ");
+    ht_text(f, x, y + 3 * art->height, ht_measure(art, row), art, orange, BG, " '--.-..-.--' ");
+    ht_text(f, x, y + 4 * art->height, ht_measure(art, row), art, orange, BG, legs[(tick / 2) & 1]);
+    const char *const *set = s.view == OTA ? updating : s.connected ? loading : waiting;
+    int n = s.view == OTA || s.connected ? 1 : 3, total = 0;
+    for (int i = 0; i < n; i++) total += (int)strlen(set[i]) + 14;
+    int t = (int)(tick % (unsigned)total), line = 0;
+    while (t >= (int)strlen(set[line]) + 14) t -= (int)strlen(set[line++]) + 14;
+    int len = (int)strlen(set[line]), typed = t < len ? t : len;
+    char text[40];
+    snprintf(text, sizeof text, "%.*s%s", typed, set[line], (t < len || (tick & 1)) ? "_" : "");
+    int lw = ht_measure(small, set[line]);
+    ht_text(f, (HT_WIDTH - lw) / 2, 338, lw + 12, small, DIM, BG, text);
+    if (s.view == HOME) s.pet_next_ms = ms() + 250;   // the next frame; the tick redraws the home view when it falls due
 }
 static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
                     int value, bool enabled)
@@ -1470,7 +1494,7 @@ static void render_buddy_empty(ht_scene_t *f, const ht_lead_t *l)
     const ht_font_t *plus = &ht_lv_inter_44.base;
     focus_put(f, 63, 168 - plus->height / 2, 340, plus, color(0x55565f), BG, "+", true);
     focus_put(f, 63, 238, 340, &ht_lv_inter_28.base, color(0x8a8a99), BG, "No Buddy here yet", true);
-    focus_put(f, 63, 280, 340, &ht_lv_inter_20.base, color(0x6b6d78), BG, "Add one in the Harness app.", true);
+    focus_put(f, 63, 280, 340, &ht_lv_inter_20.base, color(0x6b6d78), BG, "Add one on your computer.", true);
     face_buddy_ring(f);
     face_buddy_dots(f, true);
     s.hits[s.hit_count++] = (hit_t){{53, 0, 360, 104}, A_AGENTS, 0, true};
@@ -2482,7 +2506,7 @@ static void render_selection(ht_scene_t *f)
 {
     heading(f, selection.query[0] ? "find in output" : "select text");
     agent_t *a = active();
-    text(f, FACE_CX(324), 116, 324, selection.query[0] ? selection.query : a ? a->name : "Harness", DIM);
+    text(f, FACE_CX(324), 116, 324, selection.query[0] ? selection.query : a ? a->name : "Critter", DIM);
     if (carry.pending) {
         center(f, 207, "Picking up the text...", FG);
         center(f, 285, "Then choose who gets it", DIM);
@@ -4051,7 +4075,7 @@ void habitat_tick(void)
             } else if (s.view == DRAFT) {
                 COPY(draft.page.error, "No voice reply. Checking your draft."); change();
             } else {
-                COPY(s.title, "Voice"); COPY(s.message, "No response yet. Check Harness on your computer."); view(MESSAGE);
+                COPY(s.title, "Voice"); COPY(s.message, "No response yet. Check Critter on your computer."); view(MESSAGE);
             }
         }
     }
@@ -4834,7 +4858,7 @@ static void notice_add(const char *id, const char *name, const char *machine, co
     cable_notif_t *n = &s.notice[pos];
     memset(n, 0, sizeof(*n));
     COPY(n->agent_id, id);
-    COPY(n->name, name && *name ? name : "Harness");
+    COPY(n->name, name && *name ? name : "Critter");
     COPY(n->machine, machine);
     recap_preview(n->summary, sizeof n->summary, recap);
     n->question = question;
@@ -4911,7 +4935,7 @@ bool ui_turn_error(const char *id, const char *message)
     s.notice_sequence++;
     // Like any toast, never over a live recording or the person's own question; the drawer row still keeps the failure.
     if (!s.voice_open && !question_view(s.view)) {
-        COPY(s.title, "Harness");
+        COPY(s.title, "Critter");
         COPY(s.message, message);
         view(MESSAGE);
         if (s.view == MESSAGE) { s.error_until = ms() + ERROR_VIEW_MS; if (!s.error_until) s.error_until = 1; }
@@ -5813,7 +5837,7 @@ static bool draft_page(const cJSON *p, ht_draft_page_t *page)
     COPY(page->text, text_->valuestring); COPY(page->agent, agent->valuestring);
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(p, "name"),
         *context = cJSON_GetObjectItemCaseSensitive(p, "context");
-    COPY(page->name, cJSON_IsString(name) ? name->valuestring : "Harness");
+    COPY(page->name, cJSON_IsString(name) ? name->valuestring : "Critter");
     if (cJSON_IsString(context)) COPY(page->context, context->valuestring);
     page->position = position->valueint; page->total = total->valueint;
     page->can_undo = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, "canUndo"));
@@ -5996,7 +6020,7 @@ void ui_cable_toast(const char *message)
         return;
     }
     display_unlock();
-    ui_show_error("Harness", message);
+    ui_show_error("Critter", message);
 }
 void ui_voice_error(const char *message)
 {

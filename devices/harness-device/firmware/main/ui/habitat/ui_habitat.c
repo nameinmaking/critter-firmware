@@ -1580,6 +1580,40 @@ static void render_swarm_face(ht_scene_t *f)
     s.hits[s.hit_count++] = focus_face ? (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true}
                                        : (hit_t){{33, 66, 400, 316}, A_PET, 0, true};
 }
+// desk-dial: the voice entry's own face - a white microphone with orange sound rings that pulse outward, and "New session".
+static unsigned mix_rgb(unsigned from, unsigned to, int pct)
+{
+    unsigned out = 0;
+    for (int k = 0; k < 24; k += 8)
+        out |= (((from >> k & 255u) * (100 - pct) + (to >> k & 255u) * pct + 50) / 100) << k;
+    return out;
+}
+static void render_new_session(ht_scene_t *f)
+{
+    uint32_t t = ms();
+    int radius[3];
+    for (int k = 0; k < 3; k++) radius[k] = 62 + (int)(((t / 14) + k * 40) % 120);   // 62..181, one ring every 40 steps
+    for (int i = 0; i < 2; i++)   // largest first, so each smaller ring sits on top of it
+        for (int k = 0; k < 2 - i; k++)
+            if (radius[k] < radius[k + 1]) { int tmp = radius[k]; radius[k] = radius[k + 1]; radius[k + 1] = tmp; }
+    for (int k = 0; k < 3; k++) {
+        int r = radius[k], fade = (r - 62) * 100 / 120;
+        uint16_t ring = color(mix_rgb(0xD97757, HT_THEME_FOCUS_CANVAS, fade));
+        ht_box(f, 233 - r, 190 - r, 2 * r, 2 * r, r, ring, ring);
+        ht_box(f, 233 - r + 5, 190 - r + 5, 2 * r - 10, 2 * r - 10, r - 5, BG, BG);
+    }
+    ht_box(f, 193, 178, 80, 74, 37, FG, FG);        // the cradle ...
+    ht_box(f, 201, 178, 64, 66, 31, BG, BG);
+    ht_box(f, 186, 150, 94, 44, 0, BG, BG);         // ... open at the top
+    ht_box(f, 213, 146, 40, 84, 20, FG, FG);        // the capsule
+    ht_box(f, 231, 250, 4, 26, 2, FG, FG);          // stem and base
+    ht_box(f, 213, 276, 40, 6, 3, FG, FG);
+    center(f, 322, "New session", FG);
+    center(f, 360, "tap to talk", DIM);
+    s.pet_next_ms = (t + 50) | 1;                   // keep the rings moving
+    s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+    s.hits[s.hit_count++] = (hit_t){{0, 66, HT_WIDTH, HT_HEIGHT - 66}, A_PET, 0, true};
+}
 static void render_home(ht_scene_t *f)
 {
     s.caption_arc = (ht_rect_t){0};
@@ -1588,6 +1622,8 @@ static void render_home(ht_scene_t *f)
     if (swarm_mode()) { render_swarm_face(f); return; }
     if (workspace.touching && workspace.moved && !workspace.cancelled) { render_workspace_preview(f); return; }
     agent_t *a = active();
+    if (a && !strcmp(a->id, "desk-dial:voice") && !a->busy && !s.nap && !s.voice_retry_until && !carry.active && !carry.error[0] &&
+        !visit.available && character.id == HT_CHARACTER_FOCUS) { render_new_session(f); return; }
     // The top caption belongs to the current pane; only completed work gets
     // a recap. The bell has its own lower target, outside the voice surface.
     const char *recap = a && !a->busy && a->recap_ready && s.connected && !s.loading &&

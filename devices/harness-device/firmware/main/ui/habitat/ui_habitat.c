@@ -1094,29 +1094,36 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
     text_in(f, 40, y, HT_WIDTH - 80, UI_FONT, t, c, true);
 }
 // The wordmark shown while connecting, loading and updating. On Focus it is Inter 36, like every word on the face.
-// Critter: the boot / waiting screen, in place of the stock "Harness" wordmark. A small ASCII critter blinks, looks around and
-// wiggles its legs; a line under it types itself out. ASCII only (the mono fonts have no box-drawing glyphs). One redraw per 250 ms.
+// Critter: the boot / waiting screen, in place of the stock "Harness" wordmark. The owner's ASCII critter (drawn in ASCII Motion,
+// exported as text) plays as a loop; a line under it types itself out. ASCII only (the mono fonts have no box-drawing glyphs).
+// Frames are 5 rows of 14 columns. One redraw per 250 ms (4 fps).
 static void render_brand(ht_scene_t *f)
 {
-    static const char *const eyes[8] = {"  O    O  ", "  O    O  ", " O    O   ", "  O    O  ",
-                                        "   O    O ", "  -    -  ", "  O    O  ", "  O    O  "};
-    static const char *const legs[2] = {"   | |  | |   ", "  | |  | |    "};
+    static const char *const frames[12][5] = {
+        {".----------.  ", "|  O    O  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  / |  / |    "},
+        {".----------.  ", "|  O    O  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  | \\  | \\    "},
+        {".----------.  ", "| O    O   |  ", "|  \\__/    |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+        {".----------.  ", "|   O    O |  ", "|    \\__/  |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+        {".----------.  ", "|  -    -  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+        {".----------.hi", "|  ^    O  |  ", "|   \\__/   | o", "'-.-.--.-.-'/ ", "  | |  |      "},
+        {".----------.hi", "|  ^    O  | o", "|   \\__/   | |", "'-.-.--.-.-'/ ", "  | |  |      "},
+        {".----------.  ", "|  >    <  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "              "},
+        {"*.----------.*", " |  ^    ^  | ", " |  \\____/  | ", " '-.-.--.-.-' ", "  / /    \\ \\  "},
+        {".----------.<3", "|  ^    ^  |  ", "|  \\____/  |  ", "'-.-.--.-.-'  ", "   \\ \\  \\ \\   "},
+        {"<3.----------.", "  |  ^    ^  |", "  |  \\____/  |", "  '-.-.--.-.-'", "   / /  / /   "},
+        {".----------.  ", "|  ^    ^  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+    };
     static const char *const waiting[3] = {"waking up", "waiting for the bridge", "plug me in"};
     static const char *const loading[1] = {"fetching your sessions"};
     static const char *const updating[1] = {"updating, one moment"};
     unsigned tick = ms() / 250;
     uint16_t orange = color(0xD97757);
-    char row[16];
     const ht_font_t *art = UI_FONT, *small = &ht_mono_20;
-    int x = (HT_WIDTH - ht_measure(art, " .----------. ")) / 2, y = 120;
+    const char *const *frame = frames[tick % (sizeof frames / sizeof frames[0])];
+    int cw = ht_measure(art, frame[0]), x = (HT_WIDTH - cw) / 2, y = 120;
     int tw = ht_measure(small, "Critter Harness");
     ht_text(f, (HT_WIDTH - tw) / 2, 74, tw, small, FG, BG, "Critter Harness");
-    ht_text(f, x, y, ht_measure(art, " .----------. "), art, orange, BG, " .----------. ");
-    snprintf(row, sizeof row, " |%s| ", eyes[(tick / 3) % 8]);
-    ht_text(f, x, y + art->height, ht_measure(art, row), art, orange, BG, row);
-    ht_text(f, x, y + 2 * art->height, ht_measure(art, row), art, orange, BG, " |    __    | ");
-    ht_text(f, x, y + 3 * art->height, ht_measure(art, row), art, orange, BG, " '--.-..-.--' ");
-    ht_text(f, x, y + 4 * art->height, ht_measure(art, row), art, orange, BG, legs[(tick / 2) & 1]);
+    for (int r = 0; r < 5; r++) ht_text(f, x, y + r * art->height, cw, art, orange, BG, frame[r]);
     const char *const *set = s.view == OTA ? updating : s.connected ? loading : waiting;
     int n = s.view == OTA || s.connected ? 1 : 3, total = 0;
     for (int i = 0; i < n; i++) total += (int)strlen(set[i]) + 14;

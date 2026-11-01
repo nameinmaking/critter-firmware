@@ -48,12 +48,6 @@ static void ptt_task(void *arg)
     const bool pwr_key = board()->has_pmic;
 
     while (1) {
-        // critter: hold the PWR key ~2.5 s to switch the dial off for the day (the first press already blanked the screen).
-        if (pwr_key && power_take_pwrkey_long()) {
-            display_lock(); if (!display_is_asleep()) display_sleep(); display_unlock();
-            vTaskDelay(pdMS_TO_TICKS(200));
-            power_off();
-        }
         if (pwr_key && power_take_pwrkey_tap()) screen_toggle("PWR tap");
 
         int boot_now = gpio_get_level(BSP_BOOT_BUTTON);

@@ -21,12 +21,6 @@ static i2c_master_dev_handle_t s_dev;
 // latched by the AXP2101 on release, AFTER its internal short-press timing → a 1-2s lag. PONKEY bits:
 // 0:release  1:press  2:long  3:short. Long-press still restarts in AXP2101 hardware (REG 0x27 untouched).
 #define AXP_PKEY_PRESS    (1 << 1)
-// critter: PONKEY LONG-press event (bit 2), fired by the AXP2101 after its IRQ long-press time. We turn it into a real
-// power-off (soft off: only the PWR key or a USB plug-in wakes the board, and the battery is not drained). The hardware
-// restart still fires later (REG 0x27 OFFLEVEL, 6 s by default, untouched) if we were somehow stuck.
-#define AXP_PKEY_LONG     (1 << 2)
-#define AXP_REG_PWRON_CFG 0x27   // bits 5:4 = IRQ long-press time (0:1s 1:1.5s 2:2s 3:2.5s); bits 1:0 = OFFLEVEL (untouched)
-#define AXP_REG_COMMON    0x10   // PMU common config: bit 0 = soft power off (XPowersLib shutdown())
 
 static int  axp_read(uint8_t reg);
 static esp_err_t axp_write(uint8_t reg, uint8_t val);
@@ -41,9 +35,7 @@ static void axp_pwrkey_setup(void)
     axp_write(AXP_REG_IRQ_ST2, 0xFF);
     int en = axp_read(AXP_REG_IRQ_EN1);
     if (en < 0) en = 0;
-    axp_write(AXP_REG_IRQ_EN1, (uint8_t)(en | AXP_PKEY_PRESS | AXP_PKEY_LONG));
-    int cfg = axp_read(AXP_REG_PWRON_CFG);   // critter: only the IRQ long-press time bits, set to 2.5 s so a pocket press cannot switch it off
-    if (cfg >= 0) axp_write(AXP_REG_PWRON_CFG, (uint8_t)((cfg & ~0x30) | 0x30));
+    axp_write(AXP_REG_IRQ_EN1, (uint8_t)(en | AXP_PKEY_PRESS));
 }
 
 bool power_init(void)
@@ -94,22 +86,6 @@ bool power_take_pwrkey_tap(void)
     if (st < 0 || !(st & AXP_PKEY_PRESS)) return false;
     axp_write(AXP_REG_IRQ_ST1, AXP_PKEY_PRESS);   // write-1-to-clear only the press-edge bit
     return true;
-}
-
-bool power_take_pwrkey_long(void)
-{
-    int st = axp_read(AXP_REG_IRQ_ST1);
-    if (st < 0 || !(st & AXP_PKEY_LONG)) return false;
-    axp_write(AXP_REG_IRQ_ST1, AXP_PKEY_LONG);   // write-1-to-clear only the long-press bit
-    return true;
-}
-
-void power_off(void)
-{
-    int c = axp_read(AXP_REG_COMMON);
-    if (c < 0) { ESP_LOGW(TAG, "power off: cannot read the PMIC"); return; }
-    ESP_LOGW(TAG, "power off (soft): the PWR key or USB power wakes the board");
-    axp_write(AXP_REG_COMMON, (uint8_t)(c | 0x01));
 }
 
 int power_battery_pct(void)

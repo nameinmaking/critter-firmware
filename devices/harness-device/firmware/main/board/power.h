@@ -21,9 +21,3 @@ bool power_is_on_external(void);
 // read over I2C. Returns true once per short press. A LONG press is handled by the AXP2101 itself as a
 // hardware restart and is never seen here.
 bool power_take_pwrkey_tap(void);
-
-// critter: true once per LONG press of button A (about 2.5 s). The firmware answers it with power_off().
-bool power_take_pwrkey_long(void);
-
-// critter: switch the whole board off through the AXP2101 (soft power off). The PWR key or plugging in USB powers it back on.
-void power_off(void);

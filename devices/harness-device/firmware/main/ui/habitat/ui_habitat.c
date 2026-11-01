@@ -1140,6 +1140,17 @@ static void button(ht_scene_t *f, int x, int y, int w, const char *label, action
     }
     ht_text(f, x, y, w, UI_FONT, enabled ? FG : DIM, ground, label);
 }
+// desk-dial: a round Claude-orange "+" button (the pet's clay colour, white plus), pressed state a shade darker.
+static void plus_button(ht_scene_t *f, int cx, int cy, action_kind_t action, bool enabled)
+{
+    if (s.hit_count >= 24) return;
+    int n = s.hit_count++;
+    s.hits[n] = (hit_t){{cx - 40, cy - 40, 80, 80}, action, 0, enabled};
+    uint16_t fill = !enabled ? DIM : n == s.pressed ? color(0xA9553B) : color(0xD97757);
+    ht_box(f, cx - 33, cy - 33, 66, 66, 33, fill, fill);
+    ht_box(f, cx - 15, cy - 3, 30, 6, 3, FG, FG);
+    ht_box(f, cx - 3, cy - 15, 6, 30, 3, FG, FG);
+}
 static bool home_footer(action_kind_t action)
 {
     // A_VOICE is the Focus face's [ say ]. It belongs here rather than on the A_PET path because a
@@ -1693,7 +1704,7 @@ static void render_home(ht_scene_t *f)
     // desk-dial: a visible way to start another session. Swiping left/right on the face already moves between sessions.
     if (focus_face && !carry.active && !carry.error[0] && !visit.available && !(bell && !told) && a && strcmp(a->id, "desk-dial:voice") &&
         !a->busy && s.connected && find("desk-dial:voice") >= 0)
-        footer_control(f, 143, 180, "[ new ]", A_NEW, true);
+        plus_button(f, 233, 400, A_NEW, true);
     if (!carry.active && !carry.error[0] && !visit.available) {
         // Both phases of the caption open the pane picker — on Focus too, whose name is on the same
         // curve. The tab list is a hold on the face (A_PET below), on every skin.

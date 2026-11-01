@@ -100,6 +100,7 @@ typedef enum {
     A_HOME,
     A_AGENTS,
     A_AGENT,
+    A_NEW,   // desk-dial: [ new ] on the face selects the "New session (voice)" entry
     A_READER,
     A_QUESTION,
     A_CHOICE,
@@ -1145,7 +1146,7 @@ static bool home_footer(action_kind_t action)
     // bracket control is pressed and released like every other one, while A_PET reads a TAP as a boop
     // and only starts speech on a 650 ms hold — which is the creature's gesture, not a button's.
     return action == A_TABS || action == A_INBOX || action == A_AGENTS || action == A_RETURN ||
-           action == A_CARRY_DROP || action == A_VOICE || action == A_TAB_LIST;
+           action == A_CARRY_DROP || action == A_VOICE || action == A_TAB_LIST || action == A_NEW;
 }
 static bool hit_contains(const hit_t *hit, int x, int y, bool surface)
 {
@@ -1689,6 +1690,10 @@ static void render_home(ht_scene_t *f)
     } else if (visit.available) {
         footer_control(f, 113, 240, "[ return ]", A_RETURN, s.connected && !visit.pending);
     }
+    // desk-dial: a visible way to start another session. Swiping left/right on the face already moves between sessions.
+    if (focus_face && !carry.active && !carry.error[0] && !visit.available && !(bell && !told) && a && strcmp(a->id, "desk-dial:voice") &&
+        !a->busy && s.connected && find("desk-dial:voice") >= 0)
+        footer_control(f, 143, 180, "[ new ]", A_NEW, true);
     if (!carry.active && !carry.error[0] && !visit.available) {
         // Both phases of the caption open the pane picker — on Focus too, whose name is on the same
         // curve. The tab list is a hold on the face (A_PET below), on every skin.
@@ -2947,6 +2952,12 @@ static void dispatch(action_t a)
         s.offset = s.active - TAB_ROWS / 2;
         if (s.offset > last) s.offset = last;
         if (s.offset < 0) s.offset = 0;
+        break;
+    }
+    case A_NEW: {
+        action_t sel = {.kind = A_AGENT};
+        COPY(sel.id, "desk-dial:voice");
+        dispatch(sel);
         break;
     }
     case A_AGENT: {

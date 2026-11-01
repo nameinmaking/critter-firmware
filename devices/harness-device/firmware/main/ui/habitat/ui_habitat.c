@@ -100,7 +100,7 @@ typedef enum {
     A_HOME,
     A_AGENTS,
     A_AGENT,
-    A_NEW,   // desk-dial: [ new ] on the face selects the "New session (voice)" entry
+    A_NEW,   // critter: [ new ] on the face selects the "New session (voice)" entry
     A_READER,
     A_QUESTION,
     A_CHOICE,
@@ -1147,7 +1147,7 @@ static void control(ht_scene_t *f, int x, int y, int w, const char *label, actio
     }
     ht_text(f, x, y, w, UI_FONT, ink, ground, label);
 }
-// desk-dial: a real button - a filled rounded box with the label centred in it, tapped anywhere inside.
+// critter: a real button - a filled rounded box with the label centred in it, tapped anywhere inside.
 static void button(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a, int value, bool enabled,
                    uint16_t fill)
 {
@@ -1164,7 +1164,7 @@ static void button(ht_scene_t *f, int x, int y, int w, const char *label, action
     }
     ht_text(f, x, y, w, UI_FONT, enabled ? FG : DIM, ground, label);
 }
-// desk-dial: a round Claude-orange "+" button (the pet's clay colour, white plus), pressed state a shade darker.
+// critter: a round Claude-orange "+" button (the pet's clay colour, white plus), pressed state a shade darker.
 static void plus_button(ht_scene_t *f, int cx, int cy, action_kind_t action, bool enabled)
 {
     if (s.hit_count >= 24) return;
@@ -1283,7 +1283,7 @@ static void surface_tick(uint32_t now)
 {
     notice_flush_reads(now);
     notice_expire(now);
-    // desk-dial: a question that arrived opens its answer screen as soon as the dial is idle and knows the pane
+    // critter: a question that arrived opens its answer screen as soon as the dial is idle and knows the pane
     // (the pane list lands a moment after the question, so this waits for it instead of checking once).
     if (s.auto_question[0]) {
         if (!is_question(s.auto_question)) s.auto_question[0] = 0;   // answered or withdrawn meanwhile
@@ -1725,9 +1725,9 @@ static void render_home(ht_scene_t *f)
     } else if (visit.available) {
         footer_control(f, 113, 240, "[ return ]", A_RETURN, s.connected && !visit.pending);
     }
-    // desk-dial: a visible way to start another session. Swiping left/right on the face already moves between sessions.
-    if (focus_face && !carry.active && !carry.error[0] && !visit.available && !(bell && !told) && a && strcmp(a->id, "desk-dial:voice") &&
-        !a->busy && s.connected && find("desk-dial:voice") >= 0)
+    // critter: a visible way to start another session. Swiping left/right on the face already moves between sessions.
+    if (focus_face && !carry.active && !carry.error[0] && !visit.available && !(bell && !told) && a && strcmp(a->id, "critter:voice") &&
+        !a->busy && s.connected && find("critter:voice") >= 0)
         plus_button(f, 233, 322, A_NEW, true);
     if (!carry.active && !carry.error[0] && !visit.available) {
         // Both phases of the caption open the pane picker — on Focus too, whose name is on the same
@@ -1925,7 +1925,7 @@ static int question_rows(const char *value)
 {
     return ui_rows(value, UI_FONT, 348);
 }
-// desk-dial: a single yes/no style question (Start/Cancel, Allow/Deny): two option buttons, no typing, no multi-select.
+// critter: a single yes/no style question (Start/Cancel, Allow/Deny): two option buttons, no typing, no multi-select.
 static bool quick_question(void)
 {
     if (!s.q.valid || !s.q.supported || s.q.count != 1) return false;
@@ -1982,7 +1982,7 @@ static void render_question(ht_scene_t *f)
                 q->draft[0] ? A_QUESTION_REVIEW : A_QUESTION_SAY,0,!s.q.pending);
         control(f, 313, 336,102,"[next]",A_QUESTION_CHOICES,0,!s.q.pending);
     } else if (quick_question()) {
-        // desk-dial: the two options ARE the buttons, and a tap answers. Claude orange for the first, dark for the second.
+        // critter: the two options ARE the buttons, and a tap answers. Claude orange for the first, dark for the second.
         button(f, 84, 346, 140, q->options[0], A_QUICK, 0, !s.q.pending, color(0xD97757));
         button(f, 242, 346, 140, q->options[1], A_QUICK, 1, !s.q.pending, color(0x3a3a3c));
     } else {
@@ -2166,7 +2166,7 @@ static void tab_neighbour(ht_scene_t *f, const char *name, int edge, bool next)
     }
     for (; used < FADE_SLOTS; used++) ht_text(f, 0, LINE_Y, 1, font, BG, BG, "");
 }
-// desk-dial: a small white microphone, drawn above the voice entry's name in the pane picker.
+// critter: a small white microphone, drawn above the voice entry's name in the pane picker.
 static void mic_icon(ht_scene_t *f, int cx, int y)
 {
     ht_box(f, cx - 17, y + 22, 34, 32, 16, FG, FG);          // cradle
@@ -2192,7 +2192,7 @@ static void focus_carousel(ht_scene_t *f, const ht_tab_carousel_t *c, int count,
         tab_split(name, one, two, sizeof one);
         int lines = two[0] ? 2 : 1, top = lines == 2 ? 181 : 207;     // the design's 52 px lines, centred on 233
         uint16_t ink = s.connected ? color(HT_THEME_VOICE) : DIM;
-        if (pick == A_AGENT && !swarm_mode() && i < s.count && !strcmp(s.agents[i].id, "desk-dial:voice"))
+        if (pick == A_AGENT && !swarm_mode() && i < s.count && !strcmp(s.agents[i].id, "critter:voice"))
             mic_icon(f, left + TAB_PAGE / 2, top - 84);
         for (int n = 0; n < 2; n++) {
             if (n >= lines) { ht_text(f, 0, 0, 1, big, BG, BG, ""); continue; }
@@ -2477,7 +2477,7 @@ static void render_voice(ht_scene_t *f)
     snprintf(draft_detail, sizeof draft_detail, s.voice_draft_append ? "Add to your message" : "Replace part %d / %d",
         draft.page.position, draft.page.total);
     ht_character_face_t f_ = {.recipient = s.voice_target, .status = voice_status(),
-        .hint = "", .engine = s.voice_engine[0] ? s.voice_engine : "claude",   // whom this turn is for; desk-dial: never the generic waveform screen
+        .hint = "", .engine = s.voice_engine[0] ? s.voice_engine : "claude",   // whom this turn is for; critter: never the generic waveform screen
         .clock_ms = (s.quiet || display_is_asleep()) ? 0 : (ms() | 1),   // the listening scene's step (Focus)
         .mood = !s.voice_start_pending && !s.voice_waiting && audio_client_recording() ? HT_CHARACTER_LISTENING : HT_CHARACTER_WORKING,
         .pose = character.motion.reaction.pose, .ink = FG, .foreground = FG, .dim = DIM, .primary_title = true,
@@ -3012,7 +3012,7 @@ static void dispatch(action_t a)
     }
     case A_NEW: {
         action_t sel = {.kind = A_AGENT};
-        COPY(sel.id, "desk-dial:voice");
+        COPY(sel.id, "critter:voice");
         dispatch(sel);
         break;
     }
@@ -3055,7 +3055,7 @@ static void dispatch(action_t a)
             ht_gesture_guard(&gesture,ms()); dispatch(a);
         } else if (a.kind==A_QUICK && s.view==QUESTION && s.q.count==1 && a.value>=0 &&
                    a.value<s.q.item[s.q.index].count && !s.q.item[s.q.index].multi) {
-            // desk-dial: one tap on a two-option question answers it (no choices/select/review detour).
+            // critter: one tap on a two-option question answers it (no choices/select/review detour).
             question_item_t *q=&s.q.item[s.q.index];
             q->draft[0]=q->answer[0]=0; q->selected=1u<<a.value;
             if (question_answer()) { view(ANSWER_REVIEW); send_answer(); }
@@ -3088,7 +3088,7 @@ static void dispatch(action_t a)
         }
         ESP_LOGI("habitat", "notice tap: connected=%d id=%s question=%d found=%d qfeature=%d", s.connected, a.id,
                  a.id[0] ? is_question(a.id) : 0, a.id[0] ? find(a.id) : -2, cable_client_supports(CABLE_FEATURE_QUESTIONS));
-        // desk-dial: a question alert opens the answer screen (question.read -> buttons) instead of asking the
+        // critter: a question alert opens the answer screen (question.read -> buttons) instead of asking the
         // desktop app to open the pane. The stock firmware only ever showed these read-only.
         if (s.connected && a.id[0] && is_question(a.id) && find(a.id) >= 0 &&
             cable_client_supports(CABLE_FEATURE_QUESTIONS)) {
@@ -5097,7 +5097,7 @@ void ui_question_state(const cJSON *p)
     if (!cJSON_IsString(agent) || !cJSON_IsString(fetch)) return;
     display_lock();
     if (s.q.loading && !(s.view==QUESTION && !strcmp(agent->valuestring,s.q.agent) && !strcmp(fetch->valuestring,s.q.fetch)))
-        ESP_LOGW("habitat","question.state ignored: view=%d agent_match=%d fetch_match=%d",(int)s.view,!strcmp(agent->valuestring,s.q.agent),!strcmp(fetch->valuestring,s.q.fetch));   // desk-dial diagnostic
+        ESP_LOGW("habitat","question.state ignored: view=%d agent_match=%d fetch_match=%d",(int)s.view,!strcmp(agent->valuestring,s.q.agent),!strcmp(fetch->valuestring,s.q.fetch));   // critter diagnostic
     if (s.q.loading && s.view==QUESTION && !strcmp(agent->valuestring,s.q.agent) && !strcmp(fetch->valuestring,s.q.fetch)) {
         s.q.loading=false;
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p,"ok")) && cJSON_IsString(id) &&

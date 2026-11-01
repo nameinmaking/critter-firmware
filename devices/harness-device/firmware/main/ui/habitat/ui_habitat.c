@@ -1473,7 +1473,7 @@ static void render_buddy_empty(ht_scene_t *f, const ht_lead_t *l)
     focus_put(f, 63, 280, 340, &ht_lv_inter_20.base, color(0x6b6d78), BG, "Add one in the Harness app.", true);
     face_buddy_ring(f);
     face_buddy_dots(f, true);
-    s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+    s.hits[s.hit_count++] = (hit_t){{53, 0, 360, 104}, A_AGENTS, 0, true};
 }
 /*
  * A SWARM PANE'S FACE (spec §4): the agent face, built from the Lead. The project on the upper arc; working: the pet
@@ -1569,7 +1569,7 @@ static void render_swarm_face(ht_scene_t *f)
         else ht_text(f, 0, 0, 1, &ht_lv_inter_20.base, BG, BG, "");
     }
     // The same targets as a pane's face: the name opens PANES, the bell the inbox, the rest talks (to a local Lead).
-    s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+    s.hits[s.hit_count++] = (hit_t){{53, 0, 360, 104}, A_AGENTS, 0, true};
     for (int i = 0; i < f->count; i++) if (f->runs[i].arc == 1) {
         ht_rect_t r = ht_run_bounds(&f->runs[i]);
         s.caption_arc = (ht_rect_t){r.x - 14, r.y - 14, r.w + 28, r.h + 28};
@@ -1704,11 +1704,11 @@ static void render_home(ht_scene_t *f)
     // desk-dial: a visible way to start another session. Swiping left/right on the face already moves between sessions.
     if (focus_face && !carry.active && !carry.error[0] && !visit.available && !(bell && !told) && a && strcmp(a->id, "desk-dial:voice") &&
         !a->busy && s.connected && find("desk-dial:voice") >= 0)
-        plus_button(f, 233, 400, A_NEW, true);
+        plus_button(f, 233, 322, A_NEW, true);
     if (!carry.active && !carry.error[0] && !visit.available) {
         // Both phases of the caption open the pane picker — on Focus too, whose name is on the same
         // curve. The tab list is a hold on the face (A_PET below), on every skin.
-        s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+        s.hits[s.hit_count++] = (hit_t){{53, 0, 360, 104}, A_AGENTS, 0, true};
         for (int i = 0; i < f->count; i++) if (f->runs[i].arc == 1) {
             ht_rect_t r = ht_run_bounds(&f->runs[i]);
             s.caption_arc = (ht_rect_t){r.x - 14, r.y - 14, r.w + 28, r.h + 28};
@@ -1901,18 +1901,27 @@ static int question_rows(const char *value)
 {
     return ui_rows(value, UI_FONT, 348);
 }
+// desk-dial: a single yes/no style question (Start/Cancel, Allow/Deny): two option buttons, no typing, no multi-select.
+static bool quick_question(void)
+{
+    if (!s.q.valid || !s.q.supported || s.q.count != 1) return false;
+    question_item_t *q = &s.q.item[s.q.index];
+    return !q->multi && !q->can_text && q->count == 2;
+}
 static void question_text(ht_scene_t *f, const char *value)
 {
-    int rows = question_rows(value), last = rows > Q_ROWS ? rows - Q_ROWS : 0;
+    bool roomy = s.view == QUESTION && quick_question();   // no "question 1 / 1" line: the text starts higher and gets a fourth row
+    int shown = roomy ? 4 : Q_ROWS, top = roomy ? 112 : 146;
+    int rows = question_rows(value), last = rows > shown ? rows - shown : 0;
     if (s.offset > last) s.offset = last;
     if (s.offset < 0) s.offset = 0;
-    ui_wrap(f, FACE_CX(348), 146, 348, Q_ROWS, s.offset, UI_FONT, FG, value);
+    ui_wrap(f, FACE_CX(348), top, 348, shown, s.offset, UI_FONT, FG, value);
     char position[40];
-    if (rows > Q_ROWS) snprintf(position,sizeof position,"%d-%d / %d  drag to read",s.offset+1,s.offset+Q_ROWS,rows);
+    if (rows > shown) snprintf(position,sizeof position,"%d-%d / %d  drag to read",s.offset+1,s.offset+shown,rows);
     else if (s.view==CHOICE) COPY(position,"drag for choices");
     else position[0] = 0;
     // mono_20 at 276: this is chrome ABOUT the text, not the text.
-    if (!s.q.speech_error[0]) text_in(f, FACE_CX(296), 276, 296, &ht_mono_20, position, DIM, true);
+    if (!s.q.speech_error[0]) text_in(f, FACE_CX(296), roomy ? 290 : 276, 296, &ht_mono_20, position, DIM, true);
 }
 static void render_question(ht_scene_t *f)
 {
@@ -1930,7 +1939,7 @@ static void render_question(ht_scene_t *f)
     }
     question_item_t *q = &s.q.item[s.q.index];
     char label[40]; snprintf(label,sizeof label,"question %d / %d",s.q.index+1,s.q.count);
-    text(f, FACE_CX(216), 109, 216, label, DIM);
+    if (!quick_question()) text(f, FACE_CX(216), 109, 216, label, DIM);
     question_text(f, q->prompt);
     if (s.q.speech_error[0]) ui_wrap(f,FACE_CX(312),319,312,2,0,&ht_mono_20,ERROR,s.q.speech_error);
     if (q->can_text) {
@@ -1948,10 +1957,10 @@ static void render_question(ht_scene_t *f)
         control(f, 184, 336,119,q->draft[0] ? "[draft]" : "[say]",
                 q->draft[0] ? A_QUESTION_REVIEW : A_QUESTION_SAY,0,!s.q.pending);
         control(f, 313, 336,102,"[next]",A_QUESTION_CHOICES,0,!s.q.pending);
-    } else if (s.q.count == 1 && !q->multi && q->count == 2) {
-        // desk-dial: the two options ARE the buttons, and a tap answers.
-        button(f, 84, 346, 140, q->options[0], A_QUICK, 0, !s.q.pending, color(0x1f8a3c));
-        button(f, 242, 346, 140, q->options[1], A_QUICK, 1, !s.q.pending, color(0x48484a));
+    } else if (quick_question()) {
+        // desk-dial: the two options ARE the buttons, and a tap answers. Claude orange for the first, dark for the second.
+        button(f, 84, 346, 140, q->options[0], A_QUICK, 0, !s.q.pending, color(0xD97757));
+        button(f, 242, 346, 140, q->options[1], A_QUICK, 1, !s.q.pending, color(0x3a3a3c));
     } else {
         control(f, 79, 346,153,"[ later ]",A_HOME,0,true);
         control(f, 236, 346,153,"[choices]",A_QUESTION_CHOICES,0,!s.q.pending);

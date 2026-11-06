@@ -18,3 +18,10 @@ typedef enum { BOND_NONE, BOND_VALID, BOND_STALE } ble_bond_state_t;
 // it skipped pairing). Mirrors the bridge-side plan's stale-bond detection: a peer that claims a
 // bond the dial doesn't have (or vice versa) is BOND_STALE, not BOND_NONE.
 ble_bond_state_t ble_policy_classify_bond(bool peer_has_bond, bool peer_claims_bonded);
+
+// A small, dependency-free function so this task's test doesn't need cable_client.c's full
+// include graph: given a raw power_battery_pct() reading, return what belongs on the wire.
+// raw_pct < 0 means unknown (power.h's own convention) — has_pct is false in that case and pct
+// is meaningless.
+typedef struct { bool has_pct; int pct; bool charging; } ble_battery_wire_t;
+ble_battery_wire_t ble_battery_for_wire(int raw_pct, bool charging);

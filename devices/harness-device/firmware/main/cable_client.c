@@ -10,6 +10,7 @@
 #include "cable_link.h"
 #include "cable_ble.h"
 #include "cable_session_io.h"
+#include "ble_policy.h" // ble_battery_for_wire
 #include "cable_json_guard.h"
 #include "cable_machines.h"
 #include "device_mac.h"
@@ -22,6 +23,7 @@
 #include "last_words.h"
 #include "pet_store.h"
 #include "board/board.h"
+#include "board/power.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -1419,7 +1421,17 @@ static void handle_message(const cJSON *root)
     if (!p) p = root;   // flat messages are legal; `p` is a convenience, not a requirement
 
     if (strcmp(t, "welcome") == 0) { session_up(p); return; }
-    if (strcmp(t, "ping") == 0) { send_json(msg("pong")); return; }
+    if (strcmp(t, "ping") == 0) {
+        cJSON *pong = msg("pong");
+        if (pong) {
+            ble_battery_wire_t batt = ble_battery_for_wire(power_battery_pct(), power_is_charging());
+            if (batt.has_pct) cJSON_AddNumberToObject(pong, "battPct", batt.pct);
+            else cJSON_AddNullToObject(pong, "battPct");
+            cJSON_AddBoolToObject(pong, "charging", batt.charging);
+        }
+        send_json(pong);
+        return;
+    }
     if (strcmp(t, "agents.begin") == 0) { handle_agents_begin(); return; }
     if (strcmp(t, "agent") == 0) { handle_agent(p); return; }
     if (strcmp(t, "agents.end") == 0) { handle_agents_end(p); return; }

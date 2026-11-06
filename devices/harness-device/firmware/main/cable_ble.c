@@ -1,8 +1,12 @@
 #include "cable_ble.h"
 
+#include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
+#include "ble_policy.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "host/ble_hs.h"
@@ -13,6 +17,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "store/config/ble_store_config.h"
+#include "ui/ui_screens.h" // ui_cable_toast
 
 // Not declared by any IDF/NimBLE header (ble_store_config.h only declares read/write/delete) —
 // every NimBLE example forward-declares it itself in the file that calls it; bleprph's main.c
@@ -41,6 +46,29 @@ static uint16_t s_tx_val_handle;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool     s_tx_subscribed;
 static esp_timer_handle_t s_tick_timer;
+
+// Bonding/pairing state for the one connection this dial ever has at a time (undirected
+// single-peripheral advertising — see ble_advertise). See this plan's ledger (Task 3 Ruling) for
+// how these two drive ble_policy_classify_bond's two call sites.
+static bool s_peer_has_bond;   // the dial's own store already had a record for this peer at connect time
+static bool s_pairing_active;  // true from PASSKEY_ACTION until ENC_CHANGE/DISCONNECT — also Step 4's toast guard
+
+#define BOND_MAX_PEERS 8 // this dial only ever bonds to the one bridge it's paired with; generous headroom for re-pairing without deleting the old entry first
+
+static bool peer_already_bonded(const ble_addr_t *peer_id_addr)
+{
+    ble_addr_t peers[BOND_MAX_PEERS];
+    int count = 0;
+    int rc = ble_store_util_bonded_peers(peers, &count, BOND_MAX_PEERS);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_store_util_bonded_peers failed; rc=%d — treating as no bond on file", rc);
+        return false;
+    }
+    for (int i = 0; i < count; i++) {
+        if (ble_addr_cmp(&peers[i], peer_id_addr) == 0) return true;
+    }
+    return false;
+}
 
 // Every 250ms, matching cable_client.c's own session_task hello-loop cadence — NimBLE is
 // event-driven and has no polling loop of its own to piggyback a periodic tick on, the way
@@ -88,7 +116,9 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
             {
                 .uuid = &s_rx_uuid.u,
                 .access_cb = gatt_access_cb,
-                .flags = BLE_GATT_CHR_F_WRITE,
+                // _ENC makes NimBLE itself reject a write at the ATT layer — before gatt_access_cb
+                // ever runs — on a connection that isn't encrypted yet, i.e. before BOND_VALID.
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC,
             },
             {
                 .uuid = &s_tx_uuid.u,
@@ -141,20 +171,42 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "connection %s; status=%d", event->connect.status == 0 ? "established" : "failed", event->connect.status);
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
+            s_pairing_active = false;
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
+                s_peer_has_bond = peer_already_bonded(&desc.peer_id_addr);
+            } else {
+                s_peer_has_bond = false;
+            }
+            int rc = ble_gap_security_initiate(s_conn_handle);
+            if (rc != 0) {
+                ESP_LOGW(TAG, "ble_gap_security_initiate failed; rc=%d", rc);
+            }
         } else {
             ble_advertise(); // a failed connection attempt leaves us not advertising — resume it
         }
         return 0;
 
-    case BLE_GAP_EVENT_DISCONNECT:
+    case BLE_GAP_EVENT_DISCONNECT: {
         ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_tx_subscribed = false;
+        if (s_pairing_active) ui_set_ble_pairing(false, NULL); // a disconnect mid-pairing still clears the guard
+        s_pairing_active = false;
+        ble_disconnect_reason_t reason;
+        switch (event->disconnect.reason) {
+        case BLE_ERR_REM_USER_CONN_TERM: reason = BLE_DISCONNECT_CENTRAL; break;
+        case BLE_ERR_CONN_TERM_LOCAL:    reason = BLE_DISCONNECT_PERIPHERAL; break;
+        default:                         reason = BLE_DISCONNECT_LINK_LOSS; break;
+        }
         // Advertising must resume after EVERY kind of disconnect, including one the central
         // itself initiated — a documented bug in a different ESP32 BLE stack (Arduino's) is
         // exactly this failing to happen; see the design doc's prior-art section.
-        ble_advertise();
+        if (ble_policy_should_readvertise(reason)) {
+            ble_advertise();
+        }
         return 0;
+    }
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == s_tx_val_handle) {
@@ -165,6 +217,50 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_MTU:
         ESP_LOGD(TAG, "mtu update; conn_handle=%d mtu=%d", event->mtu.conn_handle, event->mtu.value);
         return 0;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            // Fresh pairing is starting (no resumption) — this call site always passes
+            // peer_claims_bonded=false; see this plan's ledger (Task 3 Ruling) for why.
+            ble_bond_state_t bond = ble_policy_classify_bond(s_peer_has_bond, false);
+            if (bond == BOND_STALE) {
+                ESP_LOGW(TAG, "rejecting a fresh pairing attempt from a peer this dial already has a bond for");
+                ui_cable_toast("BLE: a device claims a bond I don't have — re-pair it");
+                ble_gap_terminate(event->passkey.conn_handle, BLE_ERR_AUTH_FAIL);
+                return 0;
+            }
+            s_pairing_active = true;
+            uint32_t passkey = esp_random() % 1000000u;
+            char msg[48];
+            snprintf(msg, sizeof msg, "BLE pairing code: %06" PRIu32, passkey);
+            ui_set_ble_pairing(true, msg); // raises the toast guard AND shows the passkey (Step 4)
+            struct ble_sm_io pkey = { .action = BLE_SM_IOACT_DISP, .passkey = passkey };
+            int rc = ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+            if (rc != 0) {
+                ESP_LOGE(TAG, "ble_sm_inject_io failed; rc=%d", rc);
+            }
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE: {
+        bool fresh_pairing_just_ran = s_pairing_active;
+        s_pairing_active = false;
+        if (fresh_pairing_just_ran) ui_set_ble_pairing(false, NULL); // pairing concluded either way — clear the toast guard
+        if (!fresh_pairing_just_ran) {
+            // No PASSKEY_ACTION preceded this: the peer attempted to resume directly —
+            // peer_claims_bonded=true at this call site; see this plan's ledger (Task 3 Ruling).
+            ble_bond_state_t bond = ble_policy_classify_bond(s_peer_has_bond, true);
+            if (bond == BOND_STALE) {
+                ESP_LOGW(TAG, "a peer resumed without pairing but this dial has no bond for it (enc status=%d)", event->enc_change.status);
+                ui_cable_toast("BLE: a device claims a bond I don't have — re-pair it");
+            } else if (event->enc_change.status != 0) {
+                ESP_LOGE(TAG, "encryption resumption failed despite a matching bond on file; status=%d", event->enc_change.status);
+            }
+        } else if (event->enc_change.status != 0) {
+            ESP_LOGW(TAG, "pairing's encryption step failed; status=%d", event->enc_change.status);
+        }
+        return 0;
+    }
 
     default:
         return 0;
@@ -215,14 +311,16 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.gatts_register_cb = NULL;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-    // Task 1 scope only: no bonding enforcement yet. Every central that finds this advertisement
-    // can write/subscribe today — Task 2/3 (ble_policy.c, wired into this file's gap/bonding
-    // callbacks) is what turns this on before the device trusts anything it receives.
-    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
-    ble_hs_cfg.sm_bonding = 0;
-    ble_hs_cfg.sm_mitm = 0;
+    // Passkey-on-the-dial's-own-screen pairing: the dial has a display and no input, so it
+    // generates and shows the passkey (BLE_GAP_EVENT_PASSKEY_ACTION, BLE_SM_IOACT_DISP case below);
+    // the central's own OS prompts the owner to type it in. sm_mitm=1 makes NimBLE require this
+    // (reject a just-works pairing); bonding stores the result so later connects skip pairing.
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_sc = 1;
-    ESP_LOGW(TAG, "BLE advertising with no bonding enforced yet (Task 1 of the BLE transport plan) — do not treat this build as secure");
+    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
+    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
 
     ble_svc_gap_init();
     ble_svc_gatt_init();

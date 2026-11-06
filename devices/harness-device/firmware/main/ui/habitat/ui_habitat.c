@@ -231,6 +231,7 @@ static EXT_RAM_BSS_ATTR struct {
     int brightness;
     uint32_t voice_started;
     bool voice_open, voice_start_pending, voice_waiting, voice_carry;
+    bool ble_pairing_active; // guards ui_cable_toast while a BLE passkey is on screen — see ui_set_ble_pairing
     bool voice_review, voice_review_preview, voice_draft_append, voice_search, voice_swarm;
     uint32_t voice_draft_revision;
     int draft_drag;
@@ -5890,13 +5891,24 @@ void ui_visit_state(const cJSON *p)
 void ui_cable_toast(const char *message)
 {
     display_lock();
-    // General desktop notices must not dismiss a live recording or routing request.
-    if (s.voice_open) {
+    // General desktop notices must not dismiss a live recording or routing request, or overwrite
+    // a BLE passkey the owner is still reading and about to type into the other device.
+    if (s.voice_open || s.ble_pairing_active) {
         display_unlock();
         return;
     }
     display_unlock();
     ui_show_error("Harness", message);
+}
+
+void ui_set_ble_pairing(bool active, const char *passkey_message)
+{
+    display_lock();
+    s.ble_pairing_active = active;
+    display_unlock();
+    // Bypasses ui_cable_toast's own guard above on purpose: this call is what RAISES that guard,
+    // not a toast being gated by it.
+    if (active && passkey_message) ui_show_error("Harness", passkey_message);
 }
 void ui_voice_error(const char *message)
 {

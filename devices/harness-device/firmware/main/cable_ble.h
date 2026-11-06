@@ -4,8 +4,10 @@
 // stale-bond recovery, and docs/superpowers/specs/2026-11-05-dial-wireless-transport-design.md (in
 // the companion critter-harness repo) for why this exists at all.
 //
-// Task 1 scope only: build enablement, advertising, and a working RX/TX path. Bonding is NOT yet
-// enforced here — see cable_ble.c's own startup log line — that lands with ble_policy.c (Task 2/3).
+// Bonding is enforced (passkey, displayed on the dial's own screen, not just-works — see
+// BLE_GAP_EVENT_PASSKEY_ACTION in cable_ble.c) and ble_policy.c's stale-bond classification gates
+// both the pairing and resumption paths; see cable_ble.c's gap event handler and this plan's
+// ledger (Task 3 Ruling) for the exact mapping.
 #pragma once
 
 #include <stdbool.h>

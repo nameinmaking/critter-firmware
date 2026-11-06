@@ -22,6 +22,8 @@ set(BOARD_SRCS
     "device_mac.c"
     "cable_frame.c"
     "cable_link.c"
+    "cable_session_io.c"
+    "cable_ble.c"
     "cable_client.c"
     "cable_machines.c"
     "cable_scroll.c"
@@ -79,6 +81,7 @@ set(BOARD_SRCS
 set(BOARD_REQUIRES
     nvs_flash
     esp_wifi
+    bt
     esp_netif
     esp_event
     esp_http_server

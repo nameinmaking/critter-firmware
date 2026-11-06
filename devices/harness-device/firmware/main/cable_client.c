@@ -8,6 +8,8 @@
 
 #include "cJSON.h"
 #include "cable_link.h"
+#include "cable_ble.h"
+#include "cable_session_io.h"
 #include "cable_json_guard.h"
 #include "cable_machines.h"
 #include "device_mac.h"
@@ -68,9 +70,18 @@ static char              s_machine_id[MACHINE_ID_MAX];
 static atomic_bool       s_session;
 static atomic_uint       s_features;
 static bool              s_started; // boot owner; successful start is idempotent
-// Only the USB reader accesses this after start. A volatile 64-bit value is
-// not atomic on this 32-bit CPU; session expiry must share the reader's owner.
+// Only cable_session_io's single session task accesses this after start (on_frame/session_tick run
+// there and nowhere else — see cable_session_io.h), regardless of which transport delivered the
+// frame. A volatile 64-bit value is not atomic on this 32-bit CPU; session expiry must share that
+// one task's ownership, the same reason the rest of this file's session state has no lock.
 static int64_t           s_last_rx_us;
+// Which transport delivered the most recently processed frame — drives cable_transport_send()
+// below so a reply goes out the same way the request came in. Set from on_frame's ctx parameter,
+// which is NULL for USB (cable_link_start's ctx) or &s_ble_ctx for BLE (cable_ble_start's ctx) —
+// see cable_client_start. Safe to read/write unlocked for the same reason s_last_rx_us is: only
+// the one session task ever touches it.
+static bool              s_active_is_ble;
+static const int         s_ble_ctx; // address used as a sentinel only; the value is never read
 static char              s_machine_name[CABLE_NAME_MAX];
 static uint32_t          s_bad, s_unknown;
 
@@ -81,6 +92,16 @@ bool cable_client_supports(uint32_t features)
 
 // ── outbound ────────────────────────────────────────────────────────────────────────────────────────
 
+// Sends out whichever transport delivered the most recent frame (s_active_is_ble), so a reply goes
+// back the same way the request came in. Same three-argument shape as cable_link_send/
+// cable_ble_send on purpose — a drop-in replacement for the direct cable_link_send calls below.
+static bool cable_transport_send(uint8_t type, const uint8_t *payload, size_t payload_len)
+{
+    return s_active_is_ble
+        ? cable_ble_send(type, payload, payload_len)
+        : cable_link_send(type, payload, payload_len);
+}
+
 // Serialise and send. Takes ownership of `root` — every caller builds a tree for exactly one message, and
 // making the send own it is what keeps an early return from leaking one.
 static bool send_json(cJSON *root)
@@ -89,7 +110,7 @@ static bool send_json(cJSON *root)
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!text) return false;
-    const bool ok = cable_link_send(CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
+    const bool ok = cable_transport_send(CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
     cJSON_free(text);
     return ok;
 }
@@ -466,7 +487,7 @@ void cable_client_send_scroll(cable_scroll_phase_t phase, int dy, int velocity)
     // that came to rest before it lifted — which must land as a stop, not as a throw.
     char wire[CABLE_SCROLL_JSON_MAX];
     size_t n = cable_scroll_encode(wire, sizeof wire, phase, dy, velocity);
-    if (n) cable_link_send(CABLE_TYPE_JSON, (const uint8_t *)wire, n);
+    if (n) cable_transport_send(CABLE_TYPE_JSON, (const uint8_t *)wire, n);
 }
 
 void cable_client_answer(const char *agent_id, const char *request_id, const cJSON *answers)
@@ -731,7 +752,7 @@ void cable_client_select_text(const char *agent_id, const char *selection_id, ui
 
 bool cable_client_voice_pcm(const uint8_t *pcm, size_t len)
 {
-    return cable_link_send(CABLE_TYPE_PCM, pcm, len);
+    return cable_transport_send(CABLE_TYPE_PCM, pcm, len);
 }
 
 void cable_client_draft(const char *id,const char *op,uint32_t request,uint32_t revision,int delta)
@@ -1597,7 +1618,10 @@ static void handle_message(const cJSON *root)
 static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size_t payload_len, void *ctx)
 {
     (void)version;
-    (void)ctx;
+    // Last-frame-wins: whichever transport most recently delivered a frame is the one a reply goes
+    // back out on (cable_transport_send). This runs on cable_session_io's single session task, same
+    // as the rest of this function — see cable_session_io.h for why that matters here.
+    s_active_is_ble = (ctx == &s_ble_ctx);
     if (type == CABLE_TYPE_FW) {
         s_last_rx_us = esp_timer_get_time();
         // Straight to flash, on this task. That is deliberate and it is what the credit window is sized
@@ -1681,9 +1705,21 @@ bool cable_client_start(void)
         ESP_LOGE(TAG, "session task create failed — no handshake");
         goto failed;
     }
-    if (!cable_link_start(on_frame, session_tick, NULL)) {
+    // cable_session_io is the only caller of on_frame/session_tick (see its own header for why) —
+    // both transports are given its feed/tick adapters below, never the real handlers directly.
+    if (!cable_session_io_start(on_frame, session_tick, NULL)) {
         vTaskDelete(hello_task);
         goto failed;
+    }
+    if (!cable_link_start(cable_session_io_feed, cable_session_io_tick, NULL)) {
+        vTaskDelete(hello_task);
+        goto failed;
+    }
+    // A BLE start failure is not fatal to the session: the dial still works over USB (see
+    // cable_ble_start's own doc comment). s_ble_ctx is a distinct, never-dereferenced sentinel
+    // pointer purely so on_frame can tell which transport delivered a given frame.
+    if (!cable_ble_start(cable_session_io_feed, cable_session_io_tick, (void *)&s_ble_ctx)) {
+        ESP_LOGW(TAG, "BLE transport did not start — the dial still works over USB");
     }
     s_started = true;
     xTaskNotifyGive(hello_task);

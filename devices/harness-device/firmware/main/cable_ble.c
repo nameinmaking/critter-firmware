@@ -5,10 +5,12 @@
 #include <string.h>
 
 #include "ble_policy.h"
+#include "cable_session_io.h" // cable_session_io_run — serializes on_disconnect against on_frame/session_tick
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include "host/util/util.h"
@@ -39,6 +41,7 @@ static const ble_uuid128_t s_tx_uuid =
 static cable_frame_cb  s_cb;
 static cable_tick_cb   s_tick;
 static void           *s_ctx;
+static void          (*s_on_disconnect)(void);
 static cable_decoder_t s_decoder; // this transport's own decoder instance — see cable_session_io.h
 
 static uint8_t own_addr_type;
@@ -46,12 +49,27 @@ static uint16_t s_tx_val_handle;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool     s_tx_subscribed;
 static esp_timer_handle_t s_tick_timer;
+static esp_timer_handle_t s_link_timeout_timer;
 
 // Bonding/pairing state for the one connection this dial ever has at a time (undirected
-// single-peripheral advertising — see ble_advertise). See this plan's ledger (Task 3 Ruling) for
-// how these two drive ble_policy_classify_bond's two call sites.
+// single-peripheral advertising — see ble_advertise). See this plan's ledger (Task 3 Ruling, and
+// the Final Review fix-pass Rulings) for how these drive ble_policy_classify_bond's two call sites.
 static bool s_peer_has_bond;   // the dial's own store already had a record for this peer at connect time
 static bool s_pairing_active;  // true from PASSKEY_ACTION until ENC_CHANGE/DISCONNECT — also Step 4's toast guard
+
+// Set only once BLE_GAP_EVENT_ENC_CHANGE reports both `encrypted` and `authenticated` on the
+// connection descriptor — i.e. the passkey exchange actually happened, not merely an encrypted
+// Just Works link. cable_ble_send refuses to notify anything until this is true, independent of
+// the RX characteristic's own WRITE_AUTHEN enforcement: the two are separate layers (inbound ATT
+// permission vs. outbound application gate) and neither substitutes for the other. Cleared on
+// every CONNECT and DISCONNECT.
+static bool s_link_trusted;
+
+// A connection that never becomes trusted (ignores the security request, stalls mid-pairing, or
+// completes only a Just Works encryption) would otherwise hold the single connection slot forever
+// — nothing else disconnects it. This bounds that: it is armed on every CONNECT and disarmed the
+// moment the link is trusted or the peer disconnects on its own.
+#define BLE_LINK_TRUST_TIMEOUT_US (30 * 1000 * 1000)
 
 #define BOND_MAX_PEERS 8 // this dial only ever bonds to the one bridge it's paired with; generous headroom for re-pairing without deleting the old entry first
 
@@ -79,6 +97,16 @@ static void tick_timer_cb(void *arg)
 {
     (void)arg;
     if (s_tick) s_tick(s_ctx);
+}
+
+static void link_timeout_cb(void *arg)
+{
+    (void)arg;
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE && !s_link_trusted) {
+        ESP_LOGW(TAG, "connection %d never became trusted within %ds — terminating it so advertising can resume for someone else",
+                 s_conn_handle, BLE_LINK_TRUST_TIMEOUT_US / 1000000);
+        ble_gap_terminate(s_conn_handle, BLE_ERR_AUTH_FAIL);
+    }
 }
 
 // Wraps the given `cb` with the BLE-only bulk-transfer exclusion documented in cable_ble.h.
@@ -116,9 +144,12 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
             {
                 .uuid = &s_rx_uuid.u,
                 .access_cb = gatt_access_cb,
-                // _ENC makes NimBLE itself reject a write at the ATT layer — before gatt_access_cb
-                // ever runs — on a connection that isn't encrypted yet, i.e. before BOND_VALID.
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC,
+                // _AUTHEN (not just _ENC) makes NimBLE itself reject a write at the ATT layer —
+                // before gatt_access_cb ever runs — on a link that hasn't completed the passkey
+                // exchange, including one that merely encrypted via Just Works. _NO_RSP matches
+                // how the bridge actually writes this characteristic (write-without-response);
+                // plain _WRITE stays too so a central that prefers write-with-response still works.
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_AUTHEN,
             },
             {
                 .uuid = &s_tx_uuid.u,
@@ -143,15 +174,27 @@ static void ble_advertise(void)
     fields.uuids128 = (ble_uuid128_t *)&s_service_uuid;
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
-    const char *name = ble_svc_gap_device_name();
-    fields.name = (uint8_t *)name;
-    fields.name_len = strlen(name);
-    fields.name_is_complete = 1;
+    // The name does NOT go here: flags (3B) + a complete 128-bit UUID list (2+16=18B) already
+    // total 21 of the legacy advertising packet's 31-byte budget, and adding "harness-dial" (2+12)
+    // would overflow it — ble_gap_adv_set_fields would then fail outright and this dial would never
+    // advertise at all. The name goes in the scan response instead, a second, separate 31-byte
+    // packet a central only gets if it actively scans, which costs this packet nothing.
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
         ESP_LOGE(TAG, "error setting advertisement data; rc=%d", rc);
         return;
+    }
+
+    struct ble_hs_adv_fields rsp_fields;
+    memset(&rsp_fields, 0, sizeof rsp_fields);
+    const char *name = ble_svc_gap_device_name();
+    rsp_fields.name = (uint8_t *)name;
+    rsp_fields.name_len = strlen(name);
+    rsp_fields.name_is_complete = 1;
+    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "error setting scan response data; rc=%d — advertising without a name", rc);
     }
 
     memset(&adv_params, 0, sizeof adv_params);
@@ -163,6 +206,12 @@ static void ble_advertise(void)
     }
 }
 
+static void run_on_disconnect(void *arg)
+{
+    (void)arg;
+    if (s_on_disconnect) s_on_disconnect();
+}
+
 int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
@@ -172,6 +221,8 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             s_conn_handle = event->connect.conn_handle;
             s_pairing_active = false;
+            s_link_trusted = false;
+            cable_decoder_reset(&s_decoder); // a half-received frame from a prior connection must not bleed into this one
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
                 s_peer_has_bond = peer_already_bonded(&desc.peer_id_addr);
@@ -182,6 +233,7 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             if (rc != 0) {
                 ESP_LOGW(TAG, "ble_gap_security_initiate failed; rc=%d", rc);
             }
+            if (s_link_timeout_timer) esp_timer_start_once(s_link_timeout_timer, BLE_LINK_TRUST_TIMEOUT_US);
         } else {
             ble_advertise(); // a failed connection attempt leaves us not advertising — resume it
         }
@@ -191,13 +243,19 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "disconnect; reason=%d", event->disconnect.reason);
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_tx_subscribed = false;
+        s_link_trusted = false;
+        if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
+        cable_decoder_reset(&s_decoder); // whatever was mid-frame when the link dropped is not valid for the next connection either
         if (s_pairing_active) ui_set_ble_pairing(false, NULL); // a disconnect mid-pairing still clears the guard
         s_pairing_active = false;
+        cable_session_io_run(run_on_disconnect, NULL); // tells cable_client.c BLE is no longer the active transport, serialized against on_frame
         ble_disconnect_reason_t reason;
+        // event->disconnect.reason is a host status code (BLE_HS_HCI_ERR(hci_code)), not a raw HCI
+        // reason — comparing against bare BLE_ERR_* constants here never matched either branch.
         switch (event->disconnect.reason) {
-        case BLE_ERR_REM_USER_CONN_TERM: reason = BLE_DISCONNECT_CENTRAL; break;
-        case BLE_ERR_CONN_TERM_LOCAL:    reason = BLE_DISCONNECT_PERIPHERAL; break;
-        default:                         reason = BLE_DISCONNECT_LINK_LOSS; break;
+        case BLE_HS_HCI_ERR(BLE_ERR_REM_USER_CONN_TERM): reason = BLE_DISCONNECT_CENTRAL; break;
+        case BLE_HS_HCI_ERR(BLE_ERR_CONN_TERM_LOCAL):    reason = BLE_DISCONNECT_PERIPHERAL; break;
+        default:                                         reason = BLE_DISCONNECT_LINK_LOSS; break;
         }
         // Advertising must resume after EVERY kind of disconnect, including one the central
         // itself initiated — a documented bug in a different ESP32 BLE stack (Arduino's) is
@@ -217,6 +275,22 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_MTU:
         ESP_LOGD(TAG, "mtu update; conn_handle=%d mtu=%d", event->mtu.conn_handle, event->mtu.value);
         return 0;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        // The peer is attempting to pair fresh while this dial still has a bond on file for it —
+        // the mirror image of PASSKEY_ACTION's stale-bond check (there, the dial has no bond but
+        // the peer claims one; here, the dial has one but the peer is pairing as if it had none,
+        // e.g. because the peer forgot it). Delete this dial's half and let the stack retry the
+        // pairing from scratch, which lands back on PASSKEY_ACTION with a clean slate — the owner
+        // still has to confirm the passkey either way, so this never trusts a peer on its say-so.
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ESP_LOGW(TAG, "peer re-pairing despite an existing bond — deleting the old bond and retrying");
+            ui_cable_toast("BLE: re-pairing a device I already knew — confirm the new code");
+            ble_gap_unpair(&desc.peer_id_addr);
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
@@ -249,6 +323,11 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         if (!fresh_pairing_just_ran) {
             // No PASSKEY_ACTION preceded this: the peer attempted to resume directly —
             // peer_claims_bonded=true at this call site; see this plan's ledger (Task 3 Ruling).
+            // This also catches a Just Works central that encrypted without ever triggering a
+            // passkey prompt: s_peer_has_bond is false for it too, so it lands here as STALE. It
+            // is left connected but untrusted rather than torn down on the spot — cable_ble_send's
+            // own trust gate and the RX characteristic's WRITE_AUTHEN flag already make such a
+            // link harmless, and BLE_LINK_TRUST_TIMEOUT_US bounds how long it can occupy the slot.
             ble_bond_state_t bond = ble_policy_classify_bond(s_peer_has_bond, true);
             if (bond == BOND_STALE) {
                 ESP_LOGW(TAG, "a peer resumed without pairing but this dial has no bond for it (enc status=%d)", event->enc_change.status);
@@ -258,6 +337,14 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             }
         } else if (event->enc_change.status != 0) {
             ESP_LOGW(TAG, "pairing's encryption step failed; status=%d", event->enc_change.status);
+        }
+        if (event->enc_change.status == 0) {
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0 &&
+                desc.sec_state.encrypted && desc.sec_state.authenticated) {
+                s_link_trusted = true;
+                if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
+            }
         }
         return 0;
     }
@@ -294,11 +381,12 @@ static void host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
+bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void))
 {
     s_cb = cb;
     s_tick = tick;
     s_ctx = ctx;
+    s_on_disconnect = on_disconnect;
     cable_decoder_init(&s_decoder);
 
     esp_err_t err = nimble_port_init();
@@ -313,12 +401,17 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
     // Passkey-on-the-dial's-own-screen pairing: the dial has a display and no input, so it
     // generates and shows the passkey (BLE_GAP_EVENT_PASSKEY_ACTION, BLE_SM_IOACT_DISP case below);
-    // the central's own OS prompts the owner to type it in. sm_mitm=1 makes NimBLE require this
-    // (reject a just-works pairing); bonding stores the result so later connects skip pairing.
+    // the central's own OS prompts the owner to type it in. sm_mitm alone only REQUESTS
+    // authenticated pairing — sm_sec_lvl=4 is what makes NimBLE actually require LE Secure
+    // Connections with an authenticated key for GATT access, and sm_sc_only=1 refuses to fall back
+    // to legacy (passively crackable) pairing. Bonding stores the result so later connects skip
+    // pairing.
     ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_DISP_ONLY;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_mitm = 1;
     ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_sc_only = 1;
+    ble_hs_cfg.sm_sec_lvl = 4;
     ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
     ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
 
@@ -353,23 +446,62 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx)
         ESP_LOGW(TAG, "no periodic tick timer — BLE sessions will not notice an idle host as promptly");
     }
 
+    const esp_timer_create_args_t timeout_args = {
+        .callback = link_timeout_cb,
+        .name = "cable_ble_trust_to",
+    };
+    if (esp_timer_create(&timeout_args, &s_link_timeout_timer) != ESP_OK) {
+        ESP_LOGW(TAG, "no link-trust timeout timer — an unauthenticated connection could hold the slot indefinitely");
+        s_link_timeout_timer = NULL;
+    }
+
     nimble_port_freertos_init(host_task);
     return true;
 }
 
+// Guards s_tx_frame exactly as cable_link.c's s_tx_lock guards its own static frame buffer:
+// CABLE_MAX_FRAME (8200 bytes) does not fit on any of this dial's task stacks (cable_link.c itself
+// says so), and cable_ble_send is called from several of them (the session task, UI, audio).
+static SemaphoreHandle_t s_tx_lock;
+static uint8_t s_tx_frame[CABLE_MAX_FRAME];
+
 bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)
 {
-    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE || !s_tx_subscribed) return false;
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE || !s_tx_subscribed || !s_link_trusted) return false;
 
-    uint8_t frame[CABLE_MAX_FRAME];
-    int n = cable_frame_encode(type, payload, payload_len, frame, sizeof(frame));
+    if (!s_tx_lock) {
+        s_tx_lock = xSemaphoreCreateMutex();
+        if (!s_tx_lock) return false;
+    }
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+
+    int n = cable_frame_encode(type, payload, payload_len, s_tx_frame, sizeof(s_tx_frame));
     if (n < 0) {
         ESP_LOGE(TAG, "refusing to send %u-byte payload (type %u) — too large to frame", (unsigned)payload_len, (unsigned)type);
+        xSemaphoreGive(s_tx_lock);
         return false;
     }
 
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(frame, (uint16_t)n);
-    if (!om) return false; // no memory for this notification right now — same "not connected" treatment as any other send failure
-    int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
-    return rc == 0;
+    // A notification is truncated silently at the connection's negotiated ATT MTU minus the
+    // 3-byte ATT notify header — NimBLE never reports this as an error, it just cuts the payload.
+    // CABLE_MAX_FRAME is far larger than any realistic MTU, so every frame above a couple hundred
+    // bytes (which is most of them — hello alone is) has to go out as several notifications. The
+    // decoder on both ends resyncs across chunk boundaries the same way it already does across
+    // separate GATT writes, so chunk boundaries need not align with frame boundaries.
+    uint16_t mtu = ble_att_mtu(s_conn_handle);
+    if (mtu <= 3) mtu = BLE_ATT_MTU_DFLT;
+    const size_t chunk_cap = (size_t)mtu - 3;
+
+    bool ok = true;
+    for (size_t off = 0; off < (size_t)n; off += chunk_cap) {
+        size_t len = (size_t)n - off;
+        if (len > chunk_cap) len = chunk_cap;
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(s_tx_frame + off, (uint16_t)len);
+        if (!om) { ok = false; break; } // no memory for this notification right now — same "not connected" treatment as any other send failure
+        int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
+        if (rc != 0) { ok = false; break; }
+    }
+
+    xSemaphoreGive(s_tx_lock);
+    return ok;
 }

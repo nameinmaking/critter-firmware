@@ -559,6 +559,12 @@ static void view(view_t v)
         !(v == VOICE && s.voice_open && s.voice_return == DRAFT)) return;
     if (s.voice_open && v != VOICE)
         return;
+    // A BLE passkey the owner is mid-way through reading and typing elsewhere must not be bumped
+    // off screen by an unrelated notice — an agent event, a voice error, anything else that would
+    // otherwise call view() while it's up. Only ui_set_ble_pairing(false, ...) (pairing concluding)
+    // clears s.ble_pairing_active, which is what lets a later view() call through again.
+    if (s.ble_pairing_active && v != MESSAGE)
+        return;
     if (carry.pending && v != SELECTION) ht_carry_close(&carry);
     if (selection.active && v != SELECTION && v != VOICE) ht_selection_close(&selection);
     if (s.view == INBOX && v != INBOX) s.opening_notice[0] = 0;
@@ -5905,6 +5911,11 @@ void ui_set_ble_pairing(bool active, const char *passkey_message)
 {
     display_lock();
     s.ble_pairing_active = active;
+    // A live voice turn blocks view() from changing the screen at all (see view()'s own guard
+    // above s.ble_pairing_active's) — force it closed first so the passkey is not silently
+    // swallowed. Pairing only ever starts from a fresh BLE connection, never mid-voice-turn by
+    // the owner's own action, so there is nothing of the owner's to lose here.
+    if (active && passkey_message) voice_close();
     display_unlock();
     // Bypasses ui_cable_toast's own guard above on purpose: this call is what RAISES that guard,
     // not a toast being gated by it.

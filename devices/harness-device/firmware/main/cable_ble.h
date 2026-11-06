@@ -7,7 +7,14 @@
 // Bonding is enforced (passkey, displayed on the dial's own screen, not just-works — see
 // BLE_GAP_EVENT_PASSKEY_ACTION in cable_ble.c) and ble_policy.c's stale-bond classification gates
 // both the pairing and resumption paths; see cable_ble.c's gap event handler and this plan's
-// ledger (Task 3 Ruling) for the exact mapping.
+// ledger (Task 3 Ruling, and the Final Review fix-pass Rulings) for the exact mapping.
+//
+// Sending is additionally gated on the link actually being encrypted AND authenticated (not just
+// paired) — see s_link_trusted in cable_ble.c. A connection that encrypts without authenticating
+// (a central that completes Just Works instead of the passkey exchange) can still occupy the one
+// connection slot, but cable_ble_send refuses it, the RX characteristic's WRITE_AUTHEN flag makes
+// NimBLE itself refuse the peer's writes, and a link that never reaches a trusted state within 30s
+// of connecting is terminated so legitimate centrals are not locked out indefinitely.
 #pragma once
 
 #include <stdbool.h>
@@ -22,12 +29,18 @@
 // cable_session_io_tick, not the real session handlers directly (see cable_session_io.h); this
 // file does not enforce that, it is a wiring contract documented at the call site.
 //
+// `on_disconnect`, if non-NULL, is called (with no arguments) every time a BLE central
+// disconnects, run through cable_session_io_run so it is safely serialized against on_frame/
+// session_tick on whichever task calls it from. The caller uses this to stop treating BLE as the
+// active transport once it actually goes away (see cable_client.c's s_active_is_ble) — cable_ble.c
+// has no reason to know what that state even is.
+//
 // CABLE_TYPE_FW and CABLE_TYPE_PET are never forwarded to `cb`: BLE does not carry bulk transfers
 // (firmware/pet-pack updates stay USB-only, physical-access-gated — see cable_session_io.h). Any
 // such frame arriving over BLE is logged and dropped before `cb` ever sees it.
 //
 // Returns false if NimBLE failed to initialize (logged; the dial still works over USB).
-bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx);
+bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void));
 
 // Frame `payload` and notify it to the subscribed central. Same contract as cable_link_send: a
 // false return means no central is connected and subscribed right now — a normal state for this

@@ -4,9 +4,16 @@ A round USB companion for your agents. See their progress, read and answer quest
 task from the device on your desk. This is the open-source ESP32-S3 firmware; you can build it,
 flash a supported board, or contribute a hardware port.
 
-**The connection is USB.** The host computer runs the Harness daemon and sends the agent state over
-the cable. The current firmware has no Wi-Fi setup, backend connection, account credentials, or
-pairing code. Plugging the device into the host establishes the connection.
+**The connection is USB by default.** The host computer runs the Harness daemon and sends the agent
+state over the cable. The firmware has no Wi-Fi setup, backend connection, or account credentials.
+Plugging the device into the host establishes the connection — no pairing step.
+
+### Transports
+
+An optional BLE transport exists for machines where USB serial access to the device is blocked —
+see [`docs/ble.md`](docs/ble.md) for the GATT shape, pairing (a code shown on the device's own
+screen), and stale-bond recovery. USB stays the default; it needs no pairing and nothing about it
+changes.
 
 The schematic, PCB and enclosure designs are in [`../hardware/`](../hardware/).
 

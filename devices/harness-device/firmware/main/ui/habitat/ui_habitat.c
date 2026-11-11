@@ -1105,11 +1105,11 @@ static void render_brand(ht_scene_t *f)
     if (character.id == HT_CHARACTER_FOCUS) {
         // The wordmark in Inter Bold 48 on a 50 px line at y 208 (design 2026-10-06, focus-project.html "Connecting").
         const ht_font_t *font = &ht_lv_inter_bold_48.base;
-        int w = ht_measure(font, "Harness"), base = 208 + 50 / 2 + 48 * 93 / 256;
-        ht_text(f, (HT_WIDTH - w) / 2, base - ht_pfont(font)->ascent, w, font, FG, BG, "Harness");
+        int w = ht_measure(font, "Critter"), base = 208 + 50 / 2 + 48 * 93 / 256;
+        ht_text(f, (HT_WIDTH - w) / 2, base - ht_pfont(font)->ascent, w, font, FG, BG, "Critter");
         return;
     }
-    center(f, (466 - UI_FONT->height) / 2, "Harness", FG);
+    center(f, (466 - UI_FONT->height) / 2, "Critter", FG);
 }
 static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
                     int value, bool enabled)
@@ -1434,7 +1434,7 @@ static void render_buddy_empty(ht_scene_t *f, const ht_lead_t *l)
     const ht_font_t *plus = &ht_lv_inter_44.base;
     focus_put(f, 63, 168 - plus->height / 2, 340, plus, color(0x55565f), BG, "+", true);
     focus_put(f, 63, 238, 340, &ht_lv_inter_28.base, color(0x8a8a99), BG, "No Buddy here yet", true);
-    focus_put(f, 63, 280, 340, &ht_lv_inter_20.base, color(0x6b6d78), BG, "Add one in the Harness app.", true);
+    focus_put(f, 63, 280, 340, &ht_lv_inter_20.base, color(0x6b6d78), BG, "Add one in the Critter app.", true);
     face_buddy_ring(f);
     face_buddy_dots(f, true);
     s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
@@ -1952,8 +1952,8 @@ static const char *settings_item(int wanted, action_kind_t *action)
         {"Inbox", A_INBOX, 0}, {"Machines", A_MACHINES, 0},
         {"Model", A_MODELS, 0}, {"Stop current turn", A_STOP, 0},
         {"Nap", A_NAP, 0},
-        {"Find Harness", A_FIND, CABLE_FEATURE_FORM},
-        {"New Harness", A_FORM, CABLE_FEATURE_FORM},
+        {"Find Critter", A_FIND, CABLE_FEATURE_FORM},
+        {"New Critter", A_FORM, CABLE_FEATURE_FORM},
         {"Latest output", A_LATEST, CABLE_FEATURE_VISIT},
         {"Select text", A_SELECT_BEGIN, CABLE_FEATURE_SELECTION},
     };
@@ -2417,7 +2417,7 @@ static void render_selection(ht_scene_t *f)
 {
     heading(f, selection.query[0] ? "find in output" : "select text");
     agent_t *a = active();
-    text(f, FACE_CX(324), 116, 324, selection.query[0] ? selection.query : a ? a->name : "Harness", DIM);
+    text(f, FACE_CX(324), 116, 324, selection.query[0] ? selection.query : a ? a->name : "Critter", DIM);
     if (carry.pending) {
         center(f, 207, "Picking up the text...", FG);
         center(f, 285, "Then choose who gets it", DIM);
@@ -2456,7 +2456,7 @@ static void render_form(ht_scene_t *f)
 {
     const ht_form_page_t *p = &form.page;
     bool finding = !strncmp(form.id, "find-", 5);
-    center(f, 79, p->title[0] ? p->title : !strncmp(form.id, "find-", 5) ? "Find Harness" : "New Harness", DIM);
+    center(f, 79, p->title[0] ? p->title : !strncmp(form.id, "find-", 5) ? "Find Critter" : "New Critter", DIM);
     char count[32]; snprintf(count, sizeof count, "%d / %d", p->position, p->total);
     if (p->query[0]) text(f, FACE_CX(276), 113, 276, p->query, DIM);
     else if (p->total) center(f, 113, count, DIM);
@@ -3135,11 +3135,11 @@ static void dispatch(action_t a)
             s.voice_swarm = lead != NULL;
             if (lead) target = -1;
             if (a.value == 2) snprintf(s.voice_target, sizeof s.voice_target, "Find %.48s",
-                !strcmp(form.page.title, "Find Harness") ? "Harness" :
-                !strcmp(form.page.title, "New Harness") ? form.page.label : form.page.title);
+                !strcmp(form.page.title, "Find Critter") ? "Critter" :
+                !strcmp(form.page.title, "New Critter") ? form.page.label : form.page.title);
             else if (a.value == 7) COPY(s.voice_target, "Find in output");
             else if (a.value == 5 || a.value == 6) COPY(s.voice_target, draft.page.name);
-            else COPY(s.voice_target, lead ? lead->project : target >= 0 ? s.agents[target].name : "harness");
+            else COPY(s.voice_target, lead ? lead->project : target >= 0 ? s.agents[target].name : "critter");
             sw.voice_buddy = lead && swarm_on_buddy(lead) && lead->buddy.has;
             COPY(s.voice_engine, lead ? swarm_voice_engine(lead) : target >= 0 && a.value != 2 && a.value != 5 && a.value != 6 && a.value != 7 ?
                 s.agents[target].engine : "");
@@ -3216,7 +3216,7 @@ static void dispatch(action_t a)
         if (!s.connected || s.voice_open) break;
         if (!cable_client_supports(CABLE_FEATURE_FORM)) {
             if (a.kind == A_FIND) view(AGENTS);
-            else { COPY(s.title,"New Harness"); COPY(s.message,"Open New Harness on your computer."); view(MESSAGE); }
+            else { COPY(s.title,"New Critter"); COPY(s.message,"Open New Critter on your computer."); view(MESSAGE); }
             break;
         }
         if (!form.id[0]) {
@@ -3961,7 +3961,7 @@ void habitat_tick(void)
             } else if (s.view == DRAFT) {
                 COPY(draft.page.error, "No voice reply. Checking your draft."); change();
             } else {
-                COPY(s.title, "Voice"); COPY(s.message, "No response yet. Check Harness on your computer."); view(MESSAGE);
+                COPY(s.title, "Voice"); COPY(s.message, "No response yet. Check Critter on your computer."); view(MESSAGE);
             }
         }
     }
@@ -4744,7 +4744,7 @@ static void notice_add(const char *id, const char *name, const char *machine, co
     cable_notif_t *n = &s.notice[pos];
     memset(n, 0, sizeof(*n));
     COPY(n->agent_id, id);
-    COPY(n->name, name && *name ? name : "Harness");
+    COPY(n->name, name && *name ? name : "Critter");
     COPY(n->machine, machine);
     recap_preview(n->summary, sizeof n->summary, recap);
     n->question = question;
@@ -4821,7 +4821,7 @@ bool ui_turn_error(const char *id, const char *message)
     s.notice_sequence++;
     // Like any toast, never over a live recording or the person's own question; the drawer row still keeps the failure.
     if (!s.voice_open && !question_view(s.view)) {
-        COPY(s.title, "Harness");
+        COPY(s.title, "Critter");
         COPY(s.message, message);
         view(MESSAGE);
         if (s.view == MESSAGE) { s.error_until = ms() + ERROR_VIEW_MS; if (!s.error_until) s.error_until = 1; }
@@ -5720,7 +5720,7 @@ static bool draft_page(const cJSON *p, ht_draft_page_t *page)
     COPY(page->text, text_->valuestring); COPY(page->agent, agent->valuestring);
     const cJSON *name = cJSON_GetObjectItemCaseSensitive(p, "name"),
         *context = cJSON_GetObjectItemCaseSensitive(p, "context");
-    COPY(page->name, cJSON_IsString(name) ? name->valuestring : "Harness");
+    COPY(page->name, cJSON_IsString(name) ? name->valuestring : "Critter");
     if (cJSON_IsString(context)) COPY(page->context, context->valuestring);
     page->position = position->valueint; page->total = total->valueint;
     page->can_undo = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p, "canUndo"));
@@ -5904,7 +5904,7 @@ void ui_cable_toast(const char *message)
         return;
     }
     display_unlock();
-    ui_show_error("Harness", message);
+    ui_show_error("Critter", message);
 }
 
 void ui_set_ble_pairing(bool active, const char *passkey_message)
@@ -5919,7 +5919,7 @@ void ui_set_ble_pairing(bool active, const char *passkey_message)
     display_unlock();
     // Bypasses ui_cable_toast's own guard above on purpose: this call is what RAISES that guard,
     // not a toast being gated by it.
-    if (active && passkey_message) ui_show_error("Harness", passkey_message);
+    if (active && passkey_message) ui_show_error("Critter", passkey_message);
 }
 void ui_voice_error(const char *message)
 {

@@ -86,7 +86,7 @@ bool ht_form_tick(ht_form_t *s, uint32_t now)
     if (!s->id[0]) return false;
     if (s->pending && (int32_t)(now - s->deadline) >= 0) {
         s->pending = false; s->failed = true; s->queued = 0; s->remainder = 0;
-        snprintf(s->page.error, sizeof s->page.error, "No reply. Check Harness on desktop.");
+        snprintf(s->page.error, sizeof s->page.error, "No reply. Check Critter on desktop.");
         return true;
     }
     flush(s, now);

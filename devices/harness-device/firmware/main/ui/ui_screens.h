@@ -336,6 +336,10 @@ void ui_voice_route_abort(void);
 // One short line from the cabled Mac (a routing refusal, a send that did not land). Releases the routing
 // overlay first, then shows the message for ~2s over whatever is on screen.
 void ui_cable_toast(const char *msg);
+// Raises or clears the guard that makes ui_cable_toast drop unrelated notices while a BLE passkey
+// is on screen. active=true also shows passkey_message (bypassing that same guard — this call is
+// what raises it); active=false clears the guard and ignores passkey_message.
+void ui_set_ble_pairing(bool active, const char *passkey_message);
 
 /*
  * THE DEVICE'S SETTINGS, AS THE APP SEES THEM.

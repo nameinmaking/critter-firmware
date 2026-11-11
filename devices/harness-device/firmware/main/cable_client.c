@@ -8,6 +8,9 @@
 
 #include "cJSON.h"
 #include "cable_link.h"
+#include "cable_ble.h"
+#include "cable_session_io.h"
+#include "ble_policy.h" // ble_battery_for_wire
 #include "cable_json_guard.h"
 #include "cable_machines.h"
 #include "device_mac.h"
@@ -20,6 +23,7 @@
 #include "last_words.h"
 #include "pet_store.h"
 #include "board/board.h"
+#include "board/power.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -68,9 +72,29 @@ static char              s_machine_id[MACHINE_ID_MAX];
 static atomic_bool       s_session;
 static atomic_uint       s_features;
 static bool              s_started; // boot owner; successful start is idempotent
-// Only the USB reader accesses this after start. A volatile 64-bit value is
-// not atomic on this 32-bit CPU; session expiry must share the reader's owner.
+// Only cable_session_io's single session task accesses this after start (on_frame/session_tick run
+// there and nowhere else — see cable_session_io.h), regardless of which transport delivered the
+// frame. A volatile 64-bit value is not atomic on this 32-bit CPU; session expiry must share that
+// one task's ownership, the same reason the rest of this file's session state has no lock.
 static int64_t           s_last_rx_us;
+// Which transport delivered the most recently processed frame — drives cable_transport_send()
+// below so a reply goes out the same way the request came in. Set from on_frame's ctx parameter,
+// which is NULL for USB (cable_link_start's ctx) or &s_ble_ctx for BLE (cable_ble_start's ctx) —
+// see cable_client_start. Unlike s_last_rx_us, this is read from tasks OTHER than the session task
+// too — send_hello (the cable_session task) and anything that calls cable_transport_send outside of
+// handling an inbound frame (UI, audio) — so it is atomic rather than a plain bool despite every
+// WRITE to it happening under cable_session_io's lock (via on_frame or cable_ble_disconnected).
+static atomic_bool        s_active_is_ble;
+static const int         s_ble_ctx; // address used as a sentinel only; the value is never read
+
+// Cleared via cable_session_io_run (see cable_client_start) whenever BLE disconnects, so a reply
+// or an unprompted hello does not keep going out a dead BLE link just because it was the last
+// transport to speak. USB has no equivalent: a USB unplug is silent at this layer (cable_link.c's
+// own reader task simply stops being fed), and s_active_is_ble already defaults to false (USB).
+static void cable_transport_ble_disconnected(void)
+{
+    atomic_store(&s_active_is_ble, false);
+}
 static char              s_machine_name[CABLE_NAME_MAX];
 static uint32_t          s_bad, s_unknown;
 
@@ -81,6 +105,16 @@ bool cable_client_supports(uint32_t features)
 
 // ── outbound ────────────────────────────────────────────────────────────────────────────────────────
 
+// Sends out whichever transport delivered the most recent frame (s_active_is_ble), so a reply goes
+// back the same way the request came in. Same three-argument shape as cable_link_send/
+// cable_ble_send on purpose — a drop-in replacement for the direct cable_link_send calls below.
+static bool cable_transport_send(uint8_t type, const uint8_t *payload, size_t payload_len)
+{
+    return atomic_load(&s_active_is_ble)
+        ? cable_ble_send(type, payload, payload_len)
+        : cable_link_send(type, payload, payload_len);
+}
+
 // Serialise and send. Takes ownership of `root` — every caller builds a tree for exactly one message, and
 // making the send own it is what keeps an early return from leaking one.
 static bool send_json(cJSON *root)
@@ -89,7 +123,7 @@ static bool send_json(cJSON *root)
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!text) return false;
-    const bool ok = cable_link_send(CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
+    const bool ok = cable_transport_send(CABLE_TYPE_JSON, (const uint8_t *)text, strlen(text));
     cJSON_free(text);
     return ok;
 }
@@ -466,7 +500,7 @@ void cable_client_send_scroll(cable_scroll_phase_t phase, int dy, int velocity)
     // that came to rest before it lifted — which must land as a stop, not as a throw.
     char wire[CABLE_SCROLL_JSON_MAX];
     size_t n = cable_scroll_encode(wire, sizeof wire, phase, dy, velocity);
-    if (n) cable_link_send(CABLE_TYPE_JSON, (const uint8_t *)wire, n);
+    if (n) cable_transport_send(CABLE_TYPE_JSON, (const uint8_t *)wire, n);
 }
 
 void cable_client_answer(const char *agent_id, const char *request_id, const cJSON *answers)
@@ -731,7 +765,7 @@ void cable_client_select_text(const char *agent_id, const char *selection_id, ui
 
 bool cable_client_voice_pcm(const uint8_t *pcm, size_t len)
 {
-    return cable_link_send(CABLE_TYPE_PCM, pcm, len);
+    return cable_transport_send(CABLE_TYPE_PCM, pcm, len);
 }
 
 void cable_client_draft(const char *id,const char *op,uint32_t request,uint32_t revision,int delta)
@@ -1088,10 +1122,13 @@ static void session_up(const cJSON *p)
     s_session = true;
     ui_set_connected(true);
     if (!was) {
-        // Route the log through the link only once a peer is listening. Unplugged — or plugged into a
-        // machine with no daemon — the port stays an ordinary console and `idf.py monitor` behaves as it
-        // always has. That is the only debugging instrument this single-port board has.
-        cable_link_set_log_framing(true);
+        // Route the log through the link only once a peer is listening, and only for USB: log framing
+        // writes onto cable_link.c's own USB TX ring, which nothing drains during a BLE session, so
+        // enabling it then would make every ESP_LOG call on every task risk stalling for
+        // LOG_WRITE_WAIT_MS once that ring fills. Unplugged — or plugged into a machine with no
+        // daemon — the port stays an ordinary console and `idf.py monitor` behaves as it always has.
+        // That is the only debugging instrument this single-port board has.
+        if (!atomic_load(&s_active_is_ble)) cable_link_set_log_framing(true);
         ESP_LOGI(TAG, "session up: %s (%s, proto %d)", s_machine_name, app ? app : "daemon",
                  (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(p, "proto"))
                            ? cJSON_GetObjectItemCaseSensitive(p, "proto")->valueint
@@ -1398,7 +1435,17 @@ static void handle_message(const cJSON *root)
     if (!p) p = root;   // flat messages are legal; `p` is a convenience, not a requirement
 
     if (strcmp(t, "welcome") == 0) { session_up(p); return; }
-    if (strcmp(t, "ping") == 0) { send_json(msg("pong")); return; }
+    if (strcmp(t, "ping") == 0) {
+        cJSON *pong = msg("pong");
+        if (pong) {
+            ble_battery_wire_t batt = ble_battery_for_wire(power_battery_pct(), power_is_charging());
+            if (batt.has_pct) cJSON_AddNumberToObject(pong, "battPct", batt.pct);
+            else cJSON_AddNullToObject(pong, "battPct");
+            cJSON_AddBoolToObject(pong, "charging", batt.charging);
+        }
+        send_json(pong);
+        return;
+    }
     if (strcmp(t, "agents.begin") == 0) { handle_agents_begin(); return; }
     if (strcmp(t, "agent") == 0) { handle_agent(p); return; }
     if (strcmp(t, "agents.end") == 0) { handle_agents_end(p); return; }
@@ -1597,7 +1644,10 @@ static void handle_message(const cJSON *root)
 static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size_t payload_len, void *ctx)
 {
     (void)version;
-    (void)ctx;
+    // Last-frame-wins: whichever transport most recently delivered a frame is the one a reply goes
+    // back out on (cable_transport_send). This runs on cable_session_io's single session task, same
+    // as the rest of this function — see cable_session_io.h for why that matters here.
+    atomic_store(&s_active_is_ble, ctx == &s_ble_ctx);
     if (type == CABLE_TYPE_FW) {
         s_last_rx_us = esp_timer_get_time();
         // Straight to flash, on this task. That is deliberate and it is what the credit window is sized
@@ -1681,9 +1731,21 @@ bool cable_client_start(void)
         ESP_LOGE(TAG, "session task create failed — no handshake");
         goto failed;
     }
-    if (!cable_link_start(on_frame, session_tick, NULL)) {
+    // cable_session_io is the only caller of on_frame/session_tick (see its own header for why) —
+    // both transports are given its feed/tick adapters below, never the real handlers directly.
+    if (!cable_session_io_start(on_frame, session_tick, NULL)) {
         vTaskDelete(hello_task);
         goto failed;
+    }
+    if (!cable_link_start(cable_session_io_feed, cable_session_io_tick, NULL)) {
+        vTaskDelete(hello_task);
+        goto failed;
+    }
+    // A BLE start failure is not fatal to the session: the dial still works over USB (see
+    // cable_ble_start's own doc comment). s_ble_ctx is a distinct, never-dereferenced sentinel
+    // pointer purely so on_frame can tell which transport delivered a given frame.
+    if (!cable_ble_start(cable_session_io_feed, cable_session_io_tick, (void *)&s_ble_ctx, cable_transport_ble_disconnected)) {
+        ESP_LOGW(TAG, "BLE transport did not start — the dial still works over USB");
     }
     s_started = true;
     xTaskNotifyGive(hello_task);

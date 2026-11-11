@@ -38,6 +38,17 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 # persistent commander WSS + periodic REST fail ssl_setup with -0x7F00 (ALLOC_FAILED) / sock<0.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
+# --- Bluetooth (BLE transport alongside USB — see docs/superpowers/plans/2026-11-05-dial-ble-firmware.md) ---
+# NimBLE, not Bluedroid (the default): the dial is BLE-peripheral-only, never central, and NimBLE is
+# the lighter of the two stacks for that case.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+# Bonds default to RAM-only in this ESP-IDF version — every reboot would otherwise silently wipe
+# them, forcing the owner to re-pair after every power cycle of a battery device. Persisting them
+# to NVS is what makes "once paired, every later connection is automatic" (docs/ble.md) actually
+# true across reboots rather than only within a single boot.
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+
 # --- LWIP: room for commander WS + HTTP client + DNS concurrently ---
 CONFIG_LWIP_MAX_SOCKETS=16
 # Larger TCP send/recv buffers so continuous voice PCM streaming tolerates WiFi jitter

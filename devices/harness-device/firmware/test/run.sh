@@ -64,6 +64,18 @@ cc -std=c11 -Wall -Wextra -Werror -O1 \
 "$out/test_board"
 python3 "$here/test_board_i2c.py"
 
+# Advertising-resume and bond-classification policy for the BLE transport: no NimBLE/ESP-IDF
+# headers, by design, so it is proved here with the same plain host compiler as test_board.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/../main" -o "$out/test_ble_policy" "$here/test_ble_policy.c" "$here/../main/ble_policy.c"
+"$out/test_ble_policy"
+
+# Battery-field formatting for the pong message: raw power_battery_pct()'s "-1 means unknown"
+# convention turned into what rides the wire. Lives alongside ble_policy for the same reason.
+cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \
+   -I "$here/../main" -o "$out/test_cable_pong_battery" "$here/test_cable_pong_battery.c" "$here/../main/ble_policy.c"
+"$out/test_cable_pong_battery"
+
 # New direct compositor: fuzz partial redraws against a fresh frame under UB/bounds sanitizers.
 # SANITIZERS=address,undefined also enables ASan on hosts with a compatible ASan runtime.
 cc -std=c11 -Wall -Wextra -Werror -O1 -g -fsanitize="${SANITIZERS:-undefined,bounds}" \

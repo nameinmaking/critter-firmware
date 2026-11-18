@@ -48,6 +48,13 @@ CONFIG_BT_NIMBLE_ENABLED=y
 # to NVS is what makes "once paired, every later connection is automatic" (docs/ble.md) actually
 # true across reboots rather than only within a single boot.
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# Same reasoning as CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC above: NimBLE's mbuf/ACL/event pools default
+# to the ~150KB internal heap. On this dial that heap is already this tight that app_main's post-init
+# refresh-task stack allocation (7168B) failed outright with largest_int=3584 — confirmed on real
+# hardware, where it also made advertising itself fail with BLE_ERR_MEM_CAPACITY and put the device
+# in a boot loop. Moving NimBLE's own buffers to the 8MB PSRAM frees the internal heap for everything
+# that must stay internal (DMA, task stacks).
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 
 # --- LWIP: room for commander WS + HTTP client + DNS concurrently ---
 CONFIG_LWIP_MAX_SOCKETS=16

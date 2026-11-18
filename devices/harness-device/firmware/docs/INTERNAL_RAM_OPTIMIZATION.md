@@ -194,6 +194,11 @@ because its 6,144-byte stack is explicitly allocated in PSRAM.
 - mbedTLS record allocations through `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`.
 - WiFi/lwIP preference for PSRAM through
   `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`.
+- NimBLE mbuf/ACL/event buffer pools through
+  `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y` — without this, BLE's own
+  advertising HCI command failed with `BLE_ERR_MEM_CAPACITY` and the internal
+  heap got tight enough that an unrelated task's stack allocation failed
+  outright, triggering a boot loop (confirmed on real hardware).
 
 ## Behavioral Invariants
 

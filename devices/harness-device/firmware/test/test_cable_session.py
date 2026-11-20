@@ -41,6 +41,7 @@ code = r'''
 #define CABLE_PROTO_VERSION 3
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
+#define ESP_LOGW(...) ((void)0)
 #define ESP_OK 0
 #define pdPASS 1
 #define pdMS_TO_TICKS(ms) (ms)
@@ -49,6 +50,7 @@ typedef void (*cable_frame_cb)(uint8_t,uint8_t,const uint8_t *,size_t,void *);
 typedef void (*cable_tick_cb)(void *);
 typedef struct { int tx_buffer_size,rx_buffer_size; } usb_serial_jtag_driver_config_t;
 static bool connected, driver, fail_driver, fail_reader, new_task_ready, s_started;
+static const char *TAG __attribute__((unused)) = "test";   // ESP_LOGx are no-ops here, so every use of it vanishes
 typedef void *TaskHandle_t;
 static TaskHandle_t hello_handle;
 static unsigned attempts, fail_at, live, hellos, notifications;
@@ -131,6 +133,31 @@ static void xTaskNotifyGive(TaskHandle_t task) {
 }
 #define calloc tracked_calloc
 #define free tracked_free
+'''
+# cable_session_io.c sits between cable_client_start and the two transports now (see cable_session_io.h):
+# cable_link_start/cable_ble_start are given its feed/tick adapters, never on_frame/session_tick directly.
+# Hand-written rather than extracted: the real file's s_cb/s_tick/s_ctx/s_lock would collide with this test's
+# own stand-ins for cable_link.c's identically-named statics above, and its mutex is an irrelevant extra
+# allocation point in a single-threaded test — this keeps the existing fault-injection count unchanged while
+# preserving the one behaviour that matters here: feed/tick reach whatever cable_session_io_start was given.
+code += r'''
+static cable_frame_cb io_cb;
+static cable_tick_cb io_tick;
+static void *io_ctx;
+static bool cable_session_io_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx) {
+    io_cb = cb; io_tick = tick; io_ctx = ctx; return true;
+}
+static void cable_session_io_feed(uint8_t version, uint8_t type, const uint8_t *payload, size_t payload_len, void *ctx) {
+    io_cb(version, type, payload, payload_len, ctx);
+}
+static void cable_session_io_tick(void *ctx) { (void)ctx; io_tick(io_ctx); }
+// BLE is a second, optional transport (cable_client_start treats its own start failure as non-fatal); the
+// host test has no BLE stack, so it always declines to start, exactly like a board with BLE compiled out.
+static const int s_ble_ctx;
+static void cable_transport_ble_disconnected(void) {}
+static bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void)) {
+    (void)cb; (void)tick; (void)ctx; (void)on_disconnect; return false;
+}
 '''
 code += function(link, 'reader_task')
 code += function(link, 'cable_link_start')

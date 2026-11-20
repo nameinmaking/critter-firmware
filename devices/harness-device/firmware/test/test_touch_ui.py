@@ -56,7 +56,7 @@ code += source[source.index('typedef enum {'):source.index('static EXT_RAM_BSS_A
 code += typedef('cable_swarm_t') + typedef('cable_notif_t')
 code += r'''
 static struct {
-    bool ready, connected, loading, voice_open, voice_start_pending, voice_waiting, voice_carry, voice_review, voice_draft_append, voice_review_preview, voice_search, voice_swarm;
+    bool ready, connected, loading, voice_open, voice_start_pending, voice_waiting, voice_carry, ble_pairing_active, voice_review, voice_draft_append, voice_review_preview, voice_search, voice_swarm;
     bool coasting, touch_brake, touch_down, touch_cancelled, quiet, nap, focus_face, straight_title, muted;
     ht_rect_t pressed_rect;
     int brightness;
@@ -1048,7 +1048,7 @@ static void pane_memory_checks(const char *dir) {
     fake_ms+=3400; surface_tick(fake_ms); scene_take();
     assert(!active()->tool[0] && title_is("Working"));
     s.nap=true; scene_take(); assert(!title_is("Working")); s.nap=false;
-    s.connected=false; scene_take(); assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness")); s.connected=true;
+    s.connected=false; scene_take(); assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter")); s.connected=true;
     ui_project_emit("a",NULL,"activity","Working",NULL);
     strcpy(active()->name,"hn"); scene_take(); portrait(dir,"short-name-working");
     strcpy(active()->name,"firmware v2");
@@ -2164,7 +2164,7 @@ static void swarm_buddy_checks(const char *dir) {
     // 7c a project with no Buddy: the empty state, and a tap there starts no voice.
     swipe_next();
     assert(!strcmp(sw.lead, "B2") && title_is("docs") && lilac_ring() && buddy_dots() && !avatar());
-    assert(scene_says("No Buddy here yet") && scene_says("Add one in the Harness app."));
+    assert(scene_says("No Buddy here yet") && scene_says("Add one in the Critter app."));
     FOCUS_PAGE("buddy-7c");
     { int before = starts; tap(fake_ms + 2000, 233, 260); assert(starts == before && s.view == HOME); }
     // Swipe down: back to the PM side.
@@ -2892,7 +2892,7 @@ int main(int argc, char **argv) {
     assert(s.view==TABS && !starts);
     reset(); active()->busy=true; scene_take(); tap(1000,233,41); assert(s.view==AGENTS && !starts);
     reset(); s.connected=false; scene_take(); portrait(dir,"offline");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness") && !s.hit_count);
+    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter") && !s.hit_count);
     assert(!scene.runs[0].arc && !scene.runs[0].shimmer);
     ht_rect_t brand=ht_run_bounds(&scene.runs[0]);
     assert(abs(brand.x*2+brand.w-466)<=1 && abs(brand.y*2+brand.h-466)<=1);
@@ -2900,11 +2900,11 @@ int main(int argc, char **argv) {
     surface_tick(1500); assert(!character.motion.running);
     // Handshake alone is not ready: retain the wordmark until the roster lands.
     s.connected=true; s.loading=true; scene_take(); portrait(dir,"connecting");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness") && !s.hit_count);
+    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter") && !s.hit_count);
     surface_tick(2000); assert(!character.motion.running);
     ui_land_after_reload(); scene_take(); assert(scene.count>1);
     s.view=OTA; scene_take(); portrait(dir,"updating");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Harness") && !s.hit_count);
+    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter") && !s.hit_count);
     reset(); s.count=0; s.active=-1; scene_take();
     tap(1000,233,220); assert(!starts);
     // A missed utterance keeps the entire creature as the retry target.
@@ -3711,7 +3711,7 @@ int main(int argc, char **argv) {
     reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); s.connected = false; scene_take();
     {
         bool brand = false;
-        for (int i = 0; i < scene.count; i++) brand |= !strcmp(scene.runs[i].text, "Harness") && scene.runs[i].font == &ht_lv_inter_bold_48.base;
+        for (int i = 0; i < scene.count; i++) brand |= !strcmp(scene.runs[i].text, "Critter") && scene.runs[i].font == &ht_lv_inter_bold_48.base;
         assert(brand);
     }
     portrait_focus(dir,"focus-connecting");

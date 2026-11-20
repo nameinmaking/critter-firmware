@@ -58,7 +58,7 @@ static void select_companion(void) {}
 static ht_tab_carousel_t tab_carousel;
 #define PANE_PITCH 60
 static struct {
-    bool quick_open, coasting, ready, connected, loading, nap, voice_open, voice_start_pending, voice_waiting, voice_carry, voice_review, voice_review_preview, voice_draft_append, voice_search, voice_swarm, touch_down, touch_cancelled;
+    bool quick_open, coasting, ready, connected, loading, nap, voice_open, voice_start_pending, voice_waiting, voice_carry, ble_pairing_active, voice_review, voice_review_preview, voice_draft_append, voice_search, voice_swarm, touch_down, touch_cancelled;
     int pet_pose, view, voice_return, offset, pressed, active, pane_pos;
     uint32_t error_until;
     uint32_t pet_until, nap_until, voice_retry_until, voice_started, voice_wait_until, voice_generation, voice_question_revision, voice_draft_revision;

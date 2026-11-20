@@ -7,8 +7,8 @@ optical size (owner, 2026-10-03: SF Compact's open look-alike; docs/plans/2026-1
 five faces: inter_20 (small labels, the PANES / TABS header, inbox machine and agent, the bell count), inter_25
 (an inbox message, the "Choose a tab" pill), inter_med_26 (the curved name and the lower-arc status and Listening
 sweep), inter_28 / inter_44 (the tabs carousel's neighbours and chosen tab), inter_30 (the recap, pane and tab names,
-the working status) and inter_36 (the resting line), and the wordmark inter_bold_48: "Harness" while the dial connects,
-cut to its six letters (WORDMARK).
+the working status) and inter_36 (the resting line), and the wordmark inter_bold_48: "Critter" while the dial connects,
+cut to its letters (WORDMARK).
 Only the two FontAwesome symbols (bell, close cross) stay in lvgl_fonts.c's Montserrat, which
 gen_lvgl_assets.py cuts to them. Each face is converted as the LVGL faces were: lv_font_conv
 (pinned, run through npx) with --bpp 4 --no-compress --no-prefilter, kerning on, over gen_lvgl_assets.py's
@@ -47,7 +47,7 @@ assert MARKS <= KEEP
 # 450 / 520 match SF Compact Text Regular / Medium widths.
 INTER = {'Inter-Regular20': (14, 450), 'Inter-Regular25': (14, 450), 'Inter-Medium26': (14, 520),
          'Inter-Regular30': (14, 450), 'Inter-Regular36': (14, 450),
-         'Inter-Bold48': (28, 700)}   # opsz 28: the design's 184 px "Harness" at 48 px bold (design 2026-10-06)
+         'Inter-Bold48': (28, 700)}   # opsz 28: the design's wordmark at 48 px bold (design 2026-10-06)
 # The curved Inter name's mid-caps offset on the upper arc (px above the baseline); terminal.c's ARC_PROP_MID is 11.
 INTER_ARC_MID = 16
 # On the lower arc the glyphs are upright and the descenders point at the glass's edge, so the face keeps the
@@ -63,7 +63,7 @@ FACES = [
     ('inter_36', 'Inter-Regular36', 36, 'NULL'),   # the resting line
 ]
 # Faces that set one word: name -> (font file, px, the word). Only its letters (and the space) are kept.
-WORDMARK = [('inter_bold_48', 'Inter-Bold48', 48, 'Harness')]   # while the dial connects (design 2026-10-06)
+WORDMARK = [('inter_bold_48', 'Inter-Bold48', 48, 'Critter')]   # while the dial connects (design 2026-10-06)
 
 
 def instance_inter():

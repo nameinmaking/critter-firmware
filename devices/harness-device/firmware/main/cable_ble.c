@@ -111,16 +111,17 @@ static void ble_frame_cb(uint8_t version, uint8_t type, const uint8_t *payload, 
 
 // Runs on the ble_rx task: the frame handlers (and the replies they send) never run on the NimBLE
 // host task.
-static void ble_rx_bytes(const uint8_t *data, size_t len)
+// `gen` is the connection generation the write arrived on (tagged in gatt_access_cb). A new
+// generation resets the decoder, so a half-received frame from one connection never bleeds into
+// the next; s_decoder_gen then says which connection the frames being decoded belong to.
+static atomic_uint s_decoder_gen;
+static void ble_rx_bytes(uint32_t gen, const uint8_t *data, size_t len)
 {
+    if (gen != atomic_load(&s_decoder_gen)) {
+        cable_decoder_reset(&s_decoder);
+        atomic_store(&s_decoder_gen, gen);
+    }
     cable_decoder_feed(&s_decoder, data, len, ble_frame_cb, s_ctx);
-}
-
-// Runs on the ble_rx task after every connect/disconnect (ble_rx_reset): a half-received frame
-// from one connection must not bleed into the next.
-static void ble_rx_decoder_reset(void)
-{
-    cable_decoder_reset(&s_decoder);
 }
 
 static void link_timeout_cb(void *arg)
@@ -157,7 +158,9 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble
         ESP_LOGW(TAG, "oversized or malformed GATT write (rc=%d) — dropped", rc);
         return 0; // never fails the GATT operation itself; the frame decoder resyncs past bad bytes
     }
-    ble_rx_push(chunk, out_len); // handled on the ble_rx task, not here on the NimBLE host task
+    // Handled on the ble_rx task, not here on the NimBLE host task, tagged with the connection it
+    // arrived on. The host task handles a link's writes before its DISCONNECT, so this is exact.
+    ble_rx_push(atomic_load(&s_conn_gen), chunk, out_len);
     return 0;
 }
 
@@ -246,6 +249,10 @@ static void run_on_ready(void *arg)
     unsigned gen = (unsigned)(uintptr_t)arg;
     if (!ble_policy_link_still_current(gen, atomic_load(&s_conn_gen), s_link_trusted, s_tx_subscribed)) {
         ESP_LOGI(TAG, "BLE link changed before it could become active — staying on the current transport");
+        // Let a later SUBSCRIBE / ENC_CHANGE / tick try again for this same connection (it may only
+        // have unsubscribed for a moment). A newer generation is left alone.
+        unsigned expected = gen;
+        atomic_compare_exchange_strong(&s_active_gen, &expected, 0u);
         return;
     }
     if (s_on_ready) s_on_ready();
@@ -283,7 +290,6 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             s_pairing_active = false;
             s_link_trusted = false;
             next_conn_gen();
-            ble_rx_reset(); // a half-received frame from a prior connection must not bleed into this one
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
                 s_peer_has_bond = peer_already_bonded(&desc.peer_id_addr);
@@ -307,7 +313,6 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         s_link_trusted = false;
         next_conn_gen(); // before run_on_disconnect is queued: see run_on_ready
         if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
-        ble_rx_reset(); // whatever was mid-frame when the link dropped is not valid for the next connection either
         if (s_pairing_active) ui_set_ble_pairing(false, NULL); // a disconnect mid-pairing still clears the guard
         s_pairing_active = false;
         cable_session_io_run(run_on_disconnect, NULL); // tells cable_client.c BLE is no longer the active transport, serialized against on_frame
@@ -331,6 +336,11 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == s_tx_val_handle) {
             s_tx_subscribed = event->subscribe.cur_notify;
+            if (!event->subscribe.cur_notify && atomic_exchange(&s_active_gen, 0u) != 0u) {
+                // The central stopped listening: nothing the dial says over BLE can arrive any more, so
+                // hand replies back to USB until it subscribes again (which activates BLE afresh).
+                cable_session_io_run(run_on_disconnect, NULL);
+            }
             maybe_activate();
         }
         return 0;
@@ -512,7 +522,7 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
 
     ble_store_config_init();
 
-    if (!ble_rx_start(ble_rx_bytes, ble_tick, ble_rx_decoder_reset)) {
+    if (!ble_rx_start(ble_rx_bytes, ble_tick)) {
         ESP_LOGE(TAG, "BLE receive task did not start — BLE disabled, the dial still works over USB");
         return false;
     }
@@ -536,9 +546,10 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
 static SemaphoreHandle_t s_tx_lock;
 static uint8_t s_tx_frame[CABLE_MAX_FRAME];
 
-bool cable_ble_link_trusted(void)
+bool cable_ble_frame_is_current(void)
 {
-    return s_conn_handle != BLE_HS_CONN_HANDLE_NONE && s_link_trusted;
+    return s_conn_handle != BLE_HS_CONN_HANDLE_NONE &&
+           ble_policy_link_still_current(atomic_load(&s_decoder_gen), atomic_load(&s_conn_gen), s_link_trusted, true);
 }
 
 bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)

@@ -11,15 +11,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Starts the task. on_bytes gets received bytes in order; on_tick runs about every 250 ms; on_reset
-// runs (on this task, before any later bytes) after ble_rx_reset — the caller resets its frame
-// decoder there. Returns false if the task or buffer could not be created.
-bool ble_rx_start(void (*on_bytes)(const uint8_t *data, size_t len), void (*on_tick)(void), void (*on_reset)(void));
+// The largest write ble_rx_push accepts: the largest attribute value ATT allows.
+#define BLE_RX_MAX_WRITE 512
 
-// Queues received bytes. Called from the NimBLE host task; never blocks. False means the buffer
-// was full and the bytes were dropped (logged) — the frame decoder resyncs past the gap.
-bool ble_rx_push(const uint8_t *data, size_t len);
+// Starts the task. on_bytes gets each queued write, whole and in order, with the tag it was queued
+// with; on_tick runs about every 250 ms. Returns false if the task or buffer could not be created.
+//
+// The tag is the BLE connection generation the write arrived on (see cable_ble.c). Carrying it with
+// the bytes, instead of resetting the queue on connect/disconnect, means the receiver can tell
+// exactly which connection every byte came from: it resets its frame decoder whenever the tag
+// changes and ignores frames whose connection has ended. Nothing is discarded by timing.
+bool ble_rx_start(void (*on_bytes)(uint32_t tag, const uint8_t *data, size_t len), void (*on_tick)(void));
 
-// Discards bytes not yet handled and has on_reset run before anything pushed afterwards. Called on
-// every BLE connect and disconnect, so nothing from one connection reaches the next.
-void ble_rx_reset(void);
+// Queues one received write (at most BLE_RX_MAX_WRITE bytes). Called from the NimBLE host task;
+// never blocks. A write is queued whole or not at all; false means the buffer was full and it was
+// dropped (logged and counted) — the frame decoder resyncs past the gap.
+bool ble_rx_push(uint32_t tag, const uint8_t *data, size_t len);

@@ -1676,7 +1676,7 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
     // A BLE frame can still be on its way through ble_rx when the link drops. The disconnect clears
     // the link before it queues cable_transport_ble_disconnected under this same lock, so checking
     // here means such a frame is dropped instead of switching the dial back to a link that is gone.
-    if (ctx == &s_ble_ctx && !cable_ble_link_trusted()) {
+    if (ctx == &s_ble_ctx && !cable_ble_frame_is_current()) {
         ESP_LOGW(TAG, "dropping a BLE frame (type %u) that arrived after the link went down", (unsigned)type);
         return;
     }

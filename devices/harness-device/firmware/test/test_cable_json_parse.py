@@ -35,7 +35,7 @@ static atomic_bool s_usb_ever_rx;
 static const int s_ble_ctx;
 static bool ble_trusted;
 static unsigned dropped_ble;
-static bool cable_ble_link_trusted(void) { return ble_trusted; }
+static bool cable_ble_frame_is_current(void) { return ble_trusted; }
 static int64_t s_last_rx_us, clock_us = 123;
 static uint32_t s_bad,s_unknown;
 static unsigned handled, alloc_calls, live, fail_at, fw_slices, pet_slices;

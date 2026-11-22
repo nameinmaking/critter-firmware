@@ -100,10 +100,11 @@ typedef enum {
     A_HOME,
     A_AGENTS,
     A_AGENT,
+    A_NEW,   // critter: [ new ] on the face selects the "New session (voice)" entry
     A_READER,
     A_QUESTION,
     A_CHOICE,
-    A_ANSWER, A_QUESTION_READ, A_QUESTION_CHOICES, A_QUESTION_REVIEW, A_QUESTION_BACK, A_QUESTION_SAY,
+    A_ANSWER, A_QUESTION_READ, A_QUESTION_CHOICES, A_QUESTION_REVIEW, A_QUESTION_BACK, A_QUESTION_SAY, A_QUICK,
     A_TAB_LIST,
     A_INBOX,
     A_NOTICE,
@@ -219,7 +220,7 @@ static EXT_RAM_BSS_ATTR struct {
     uint32_t notice_sequence;
     uint32_t error_until;   // when the turn-error view clears itself (ms() clock), 0 = not a timed one
     question_t q;
-    char message[256], title[80], pending_focus[ID_MAX], opening_notice[ID_MAX];
+    char message[256], title[80], pending_focus[ID_MAX], opening_notice[ID_MAX], auto_question[ID_MAX];
     char voice_target[CABLE_NAME_MAX];
     char voice_engine[12];   // the engine of whoever this voice turn is for; empty for Find, forms and drafts
     uint32_t voice_retry_until;
@@ -1100,6 +1101,9 @@ static void center(ht_scene_t *f, int y, const char *t, uint16_t c)
     text_in(f, 40, y, HT_WIDTH - 80, UI_FONT, t, c, true);
 }
 // The wordmark shown while connecting, loading and updating. On Focus it is Inter 36, like every word on the face.
+// Critter: the boot / waiting screen, in place of the stock "Harness" wordmark. The owner's ASCII critter (drawn in ASCII Motion,
+// exported as text) plays as a loop; a line under it types itself out. ASCII only (the mono fonts have no box-drawing glyphs).
+// Frames are 5 rows of 14 columns. One redraw per 250 ms (4 fps).
 static void render_brand(ht_scene_t *f)
 {
     if (character.id == HT_CHARACTER_FOCUS) {
@@ -1109,7 +1113,42 @@ static void render_brand(ht_scene_t *f)
         ht_text(f, (HT_WIDTH - w) / 2, base - ht_pfont(font)->ascent, w, font, FG, BG, "Critter");
         return;
     }
-    center(f, (466 - UI_FONT->height) / 2, "Critter", FG);
+    static const char *const frames[12][5] = {
+        {".----------.  ", "|  O    O  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  / |  / |    "},
+        {".----------.  ", "|  O    O  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  | \\  | \\    "},
+        {".----------.  ", "| O    O   |  ", "|  \\__/    |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+        {".----------.  ", "|   O    O |  ", "|    \\__/  |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+        {".----------.  ", "|  -    -  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+        {".----------.hi", "|  ^    O  |  ", "|   \\__/   | o", "'-.-.--.-.-'/ ", "  | |  |      "},
+        {".----------.hi", "|  ^    O  | o", "|   \\__/   | |", "'-.-.--.-.-'/ ", "  | |  |      "},
+        {".----------.  ", "|  >    <  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "              "},
+        {"*.----------.*", " |  ^    ^  | ", " |  \\____/  | ", " '-.-.--.-.-' ", "  / /    \\ \\  "},
+        {".----------.<3", "|  ^    ^  |  ", "|  \\____/  |  ", "'-.-.--.-.-'  ", "   \\ \\  \\ \\   "},
+        {"<3.----------.", "  |  ^    ^  |", "  |  \\____/  |", "  '-.-.--.-.-'", "   / /  / /   "},
+        {".----------.  ", "|  ^    ^  |  ", "|   \\__/   |  ", "'-.-.--.-.-'  ", "  | |  | |    "},
+    };
+    static const char *const waiting[3] = {"waking up", "waiting for the bridge", "plug me in"};
+    static const char *const loading[1] = {"fetching your sessions"};
+    static const char *const updating[1] = {"updating, one moment"};
+    unsigned tick = ms() / 250;
+    uint16_t orange = color(0xD97757);
+    const ht_font_t *art = UI_FONT, *small = &ht_mono_20;
+    const char *const *frame = frames[tick % (sizeof frames / sizeof frames[0])];
+    int cw = ht_measure(art, frame[0]), x = (HT_WIDTH - cw) / 2, y = 120;
+    int tw = ht_measure(small, "Critter Harness");
+    ht_text(f, (HT_WIDTH - tw) / 2, 74, tw, small, FG, BG, "Critter Harness");
+    for (int r = 0; r < 5; r++) ht_text(f, x, y + r * art->height, cw, art, orange, BG, frame[r]);
+    const char *const *set = s.view == OTA ? updating : s.connected ? loading : waiting;
+    int n = s.view == OTA || s.connected ? 1 : 3, total = 0;
+    for (int i = 0; i < n; i++) total += (int)strlen(set[i]) + 14;
+    int t = (int)(tick % (unsigned)total), line = 0;
+    while (t >= (int)strlen(set[line]) + 14) t -= (int)strlen(set[line++]) + 14;
+    int len = (int)strlen(set[line]), typed = t < len ? t : len;
+    char text[40];
+    snprintf(text, sizeof text, "%.*s%s", typed, set[line], (t < len || (tick & 1)) ? "_" : "");
+    int lw = ht_measure(small, set[line]);
+    ht_text(f, (HT_WIDTH - lw) / 2, 338, lw + 12, small, DIM, BG, text);
+    if (s.view == HOME) s.pet_next_ms = ms() + 250;   // the next frame; the tick redraws the home view when it falls due
 }
 static void control(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a,
                     int value, bool enabled)
@@ -1129,13 +1168,41 @@ static void control(ht_scene_t *f, int x, int y, int w, const char *label, actio
     }
     ht_text(f, x, y, w, UI_FONT, ink, ground, label);
 }
+// critter: a real button - a filled rounded box with the label centred in it, tapped anywhere inside.
+static void button(ht_scene_t *f, int x, int y, int w, const char *label, action_kind_t a, int value, bool enabled,
+                   uint16_t fill)
+{
+    if (s.hit_count >= 24)
+        return;
+    int n = s.hit_count++;
+    s.hits[n] = (hit_t){{x, y - 14, w, 66}, a, value, enabled};
+    uint16_t ground = !enabled ? BG : n == s.pressed ? SEL : fill;
+    ht_box(f, x, y - 8, w, 54, 27, ground, ground);
+    if (focus_skin()) {
+        const ht_font_t *font = focus_face_for(UI_FONT);
+        focus_put(f, x, y + (UI_FONT->height - font->height) / 2, w, font, enabled ? FG : DIM, ground, label, true);
+        return;
+    }
+    ht_text(f, x, y, w, UI_FONT, enabled ? FG : DIM, ground, label);
+}
+// critter: a round Claude-orange "+" button (the pet's clay colour, white plus), pressed state a shade darker.
+static void plus_button(ht_scene_t *f, int cx, int cy, action_kind_t action, bool enabled)
+{
+    if (s.hit_count >= 24) return;
+    int n = s.hit_count++;
+    s.hits[n] = (hit_t){{cx - 40, cy - 40, 80, 80}, action, 0, enabled};
+    uint16_t fill = !enabled ? DIM : n == s.pressed ? color(0xA9553B) : color(0xD97757);
+    ht_box(f, cx - 33, cy - 33, 66, 66, 33, fill, fill);
+    ht_box(f, cx - 15, cy - 3, 30, 6, 3, FG, FG);
+    ht_box(f, cx - 3, cy - 15, 6, 30, 3, FG, FG);
+}
 static bool home_footer(action_kind_t action)
 {
     // A_VOICE is the Focus face's [ say ]. It belongs here rather than on the A_PET path because a
     // bracket control is pressed and released like every other one, while A_PET reads a TAP as a boop
     // and only starts speech on a 650 ms hold — which is the creature's gesture, not a button's.
     return action == A_TABS || action == A_INBOX || action == A_AGENTS || action == A_RETURN ||
-           action == A_CARRY_DROP || action == A_VOICE || action == A_TAB_LIST;
+           action == A_CARRY_DROP || action == A_VOICE || action == A_TAB_LIST || action == A_NEW;
 }
 static bool hit_contains(const hit_t *hit, int x, int y, bool surface)
 {
@@ -1232,10 +1299,24 @@ static uint32_t status_wake_ms(uint32_t now)
 }
 static void dispatch(action_t a);   // the hold below acts at once; defined with the other actions
 static void notice_expire(uint32_t now);
+static void open_question(void);
 static void surface_tick(uint32_t now)
 {
     notice_flush_reads(now);
     notice_expire(now);
+    // critter: a question that arrived opens its answer screen as soon as the dial is idle and knows the pane
+    // (the pane list lands a moment after the question, so this waits for it instead of checking once).
+    if (s.auto_question[0]) {
+        if (!is_question(s.auto_question)) s.auto_question[0] = 0;   // answered or withdrawn meanwhile
+        else if (s.connected && cable_client_supports(CABLE_FEATURE_QUESTIONS) && find(s.auto_question) >= 0 &&
+                 !s.voice_open && (s.view == HOME || s.view == AGENT || s.view == INBOX)) {
+            for (int i = 0; i < s.notice_count; i++)
+                if (!strcmp(s.notice[i].agent_id, s.auto_question)) notice_mark_read(&s.notice[i]);
+            s.active = find(s.auto_question);
+            s.auto_question[0] = 0;
+            open_question();
+        }
+    }
     if (s.error_until && (s.view != MESSAGE || (int32_t)(now - s.error_until) >= 0)) {
         if (s.view == MESSAGE) view(HOME);
         s.error_until = 0;
@@ -1434,10 +1515,10 @@ static void render_buddy_empty(ht_scene_t *f, const ht_lead_t *l)
     const ht_font_t *plus = &ht_lv_inter_44.base;
     focus_put(f, 63, 168 - plus->height / 2, 340, plus, color(0x55565f), BG, "+", true);
     focus_put(f, 63, 238, 340, &ht_lv_inter_28.base, color(0x8a8a99), BG, "No Buddy here yet", true);
-    focus_put(f, 63, 280, 340, &ht_lv_inter_20.base, color(0x6b6d78), BG, "Add one in the Critter app.", true);
+    focus_put(f, 63, 280, 340, &ht_lv_inter_20.base, color(0x6b6d78), BG, "Add one on your computer.", true);
     face_buddy_ring(f);
     face_buddy_dots(f, true);
-    s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+    s.hits[s.hit_count++] = (hit_t){{53, 0, 360, 104}, A_AGENTS, 0, true};
 }
 /*
  * A SWARM PANE'S FACE (spec §4): the agent face, built from the Lead. The project on the upper arc; working: the pet
@@ -1533,7 +1614,7 @@ static void render_swarm_face(ht_scene_t *f)
         else ht_text(f, 0, 0, 1, &ht_lv_inter_20.base, BG, BG, "");
     }
     // The same targets as a pane's face: the name opens PANES, the bell the inbox, the rest talks (to a local Lead).
-    s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+    s.hits[s.hit_count++] = (hit_t){{53, 0, 360, 104}, A_AGENTS, 0, true};
     for (int i = 0; i < f->count; i++) if (f->runs[i].arc == 1) {
         ht_rect_t r = ht_run_bounds(&f->runs[i]);
         s.caption_arc = (ht_rect_t){r.x - 14, r.y - 14, r.w + 28, r.h + 28};
@@ -1665,10 +1746,14 @@ static void render_home(ht_scene_t *f)
     } else if (visit.available) {
         footer_control(f, 113, 240, "[ return ]", A_RETURN, s.connected && !visit.pending);
     }
+    // critter: a visible way to start another session. Swiping left/right on the face already moves between sessions.
+    if (focus_face && !carry.active && !carry.error[0] && !visit.available && !(bell && !told) && a && strcmp(a->id, "critter:voice") &&
+        !a->busy && s.connected && find("critter:voice") >= 0)
+        plus_button(f, 233, 322, A_NEW, true);
     if (!carry.active && !carry.error[0] && !visit.available) {
         // Both phases of the caption open the pane picker — on Focus too, whose name is on the same
         // curve. The tab list is a hold on the face (A_PET below), on every skin.
-        s.hits[s.hit_count++] = (hit_t){{83, 0, 300, 66}, A_AGENTS, 0, true};
+        s.hits[s.hit_count++] = (hit_t){{53, 0, 360, 104}, A_AGENTS, 0, true};
         for (int i = 0; i < f->count; i++) if (f->runs[i].arc == 1) {
             ht_rect_t r = ht_run_bounds(&f->runs[i]);
             s.caption_arc = (ht_rect_t){r.x - 14, r.y - 14, r.w + 28, r.h + 28};
@@ -1861,18 +1946,37 @@ static int question_rows(const char *value)
 {
     return ui_rows(value, UI_FONT, 348);
 }
+// critter: a single yes/no style question (Start/Cancel, Allow/Deny): two option buttons, no typing, no multi-select.
+static bool quick_question(void)
+{
+    if (!s.q.valid || !s.q.supported || s.q.count != 1) return false;
+    question_item_t *q = &s.q.item[s.q.index];
+    return !q->multi && !q->can_text && q->count == 2;
+}
+// critter: a quick (two-button) question has no "question 1 / 1" line, so its text starts higher and
+// gets a fourth row. question_move pages by the same count, or a drag would overshoot and snap back.
+static bool question_roomy(void)
+{
+    return s.view == QUESTION && quick_question();
+}
+static int question_shown_rows(void)
+{
+    return question_roomy() ? 4 : Q_ROWS;
+}
 static void question_text(ht_scene_t *f, const char *value)
 {
-    int rows = question_rows(value), last = rows > Q_ROWS ? rows - Q_ROWS : 0;
+    bool roomy = question_roomy();
+    int shown = question_shown_rows(), top = roomy ? 112 : 146;
+    int rows = question_rows(value), last = rows > shown ? rows - shown : 0;
     if (s.offset > last) s.offset = last;
     if (s.offset < 0) s.offset = 0;
-    ui_wrap(f, FACE_CX(348), 146, 348, Q_ROWS, s.offset, UI_FONT, FG, value);
+    ui_wrap(f, FACE_CX(348), top, 348, shown, s.offset, UI_FONT, FG, value);
     char position[40];
-    if (rows > Q_ROWS) snprintf(position,sizeof position,"%d-%d / %d  drag to read",s.offset+1,s.offset+Q_ROWS,rows);
+    if (rows > shown) snprintf(position,sizeof position,"%d-%d / %d  drag to read",s.offset+1,s.offset+shown,rows);
     else if (s.view==CHOICE) COPY(position,"drag for choices");
     else position[0] = 0;
     // mono_20 at 276: this is chrome ABOUT the text, not the text.
-    if (!s.q.speech_error[0]) text_in(f, FACE_CX(296), 276, 296, &ht_mono_20, position, DIM, true);
+    if (!s.q.speech_error[0]) text_in(f, FACE_CX(296), roomy ? 290 : 276, 296, &ht_mono_20, position, DIM, true);
 }
 static void render_question(ht_scene_t *f)
 {
@@ -1890,7 +1994,7 @@ static void render_question(ht_scene_t *f)
     }
     question_item_t *q = &s.q.item[s.q.index];
     char label[40]; snprintf(label,sizeof label,"question %d / %d",s.q.index+1,s.q.count);
-    text(f, FACE_CX(216), 109, 216, label, DIM);
+    if (!quick_question()) text(f, FACE_CX(216), 109, 216, label, DIM);
     question_text(f, q->prompt);
     if (s.q.speech_error[0]) ui_wrap(f,FACE_CX(312),319,312,2,0,&ht_mono_20,ERROR,s.q.speech_error);
     if (q->can_text) {
@@ -1908,6 +2012,10 @@ static void render_question(ht_scene_t *f)
         control(f, 184, 336,119,q->draft[0] ? "[draft]" : "[say]",
                 q->draft[0] ? A_QUESTION_REVIEW : A_QUESTION_SAY,0,!s.q.pending);
         control(f, 313, 336,102,"[next]",A_QUESTION_CHOICES,0,!s.q.pending);
+    } else if (quick_question()) {
+        // critter: the two options ARE the buttons, and a tap answers. Claude orange for the first, dark for the second.
+        button(f, 84, 346, 140, q->options[0], A_QUICK, 0, !s.q.pending, color(0xD97757));
+        button(f, 242, 346, 140, q->options[1], A_QUICK, 1, !s.q.pending, color(0x3a3a3c));
     } else {
         control(f, 79, 346,153,"[ later ]",A_HOME,0,true);
         control(f, 236, 346,153,"[choices]",A_QUESTION_CHOICES,0,!s.q.pending);
@@ -2089,6 +2197,16 @@ static void tab_neighbour(ht_scene_t *f, const char *name, int edge, bool next)
     }
     for (; used < FADE_SLOTS; used++) ht_text(f, 0, LINE_Y, 1, font, BG, BG, "");
 }
+// critter: a small white microphone, drawn above the voice entry's name in the pane picker.
+static void mic_icon(ht_scene_t *f, int cx, int y)
+{
+    ht_box(f, cx - 17, y + 22, 34, 32, 16, FG, FG);          // cradle
+    ht_box(f, cx - 12, y + 22, 24, 26, 11, BG, BG);
+    ht_box(f, cx - 20, y + 4, 40, 28, 0, BG, BG);            // open at the top
+    ht_box(f, cx - 9, y, 18, 38, 9, FG, FG);                 // capsule
+    ht_box(f, cx - 2, y + 54, 4, 10, 2, FG, FG);             // stem and base
+    ht_box(f, cx - 10, y + 63, 20, 4, 2, FG, FG);
+}
 static void focus_carousel(ht_scene_t *f, const ht_tab_carousel_t *c, int count, const char *(*label)(int),
                            action_kind_t pick)
 {
@@ -2105,6 +2223,8 @@ static void focus_carousel(ht_scene_t *f, const ht_tab_carousel_t *c, int count,
         tab_split(name, one, two, sizeof one);
         int lines = two[0] ? 2 : 1, top = lines == 2 ? 181 : 207;     // the design's 52 px lines, centred on 233
         uint16_t ink = s.connected ? color(HT_THEME_VOICE) : DIM;
+        if (pick == A_AGENT && !swarm_mode() && i < s.count && !strcmp(s.agents[i].id, "critter:voice"))
+            mic_icon(f, left + TAB_PAGE / 2, top - 84);
         for (int n = 0; n < 2; n++) {
             if (n >= lines) { ht_text(f, 0, 0, 1, big, BG, BG, ""); continue; }
             ht_fit_width(fit, sizeof fit, n ? two : one, TAB_LINE_W, big);
@@ -2388,7 +2508,7 @@ static void render_voice(ht_scene_t *f)
     snprintf(draft_detail, sizeof draft_detail, s.voice_draft_append ? "Add to your message" : "Replace part %d / %d",
         draft.page.position, draft.page.total);
     ht_character_face_t f_ = {.recipient = s.voice_target, .status = voice_status(),
-        .hint = "", .engine = s.voice_engine,   // whom this turn is for, not the pane on the face
+        .hint = "", .engine = s.voice_engine[0] ? s.voice_engine : "claude",   // whom this turn is for; critter: never the generic waveform screen
         .clock_ms = (s.quiet || display_is_asleep()) ? 0 : (ms() | 1),   // the listening scene's step (Focus)
         .mood = !s.voice_start_pending && !s.voice_waiting && audio_client_recording() ? HT_CHARACTER_LISTENING : HT_CHARACTER_WORKING,
         .pose = character.motion.reaction.pose, .ink = FG, .foreground = FG, .dim = DIM, .primary_title = true,
@@ -2791,6 +2911,9 @@ static action_t make_action(hit_t h)
 static void open_question(void)
 {
     if (!s.connected || !active()) return;
+    // critter: opening this pane's question by any path (inbox tap, visit) uses up its pending
+    // auto-open, or surface_tick would reopen it right after "later".
+    if (!strcmp(s.auto_question, active()->id)) s.auto_question[0] = 0;
     if (!cable_client_supports(CABLE_FEATURE_QUESTIONS)) {
         action_t open={.kind=A_DESKTOP}; COPY(open.id,active()->id);
         queue(open);
@@ -2828,7 +2951,7 @@ static void question_move(int delta)
         int step=s.q.drag>0 ? 1 : -1; s.q.drag-=step*40;
         question_item_t *q=&s.q.item[s.q.index];
         const char *value=s.view==QUESTION ? q->prompt : s.view==CHOICE ? q->options[s.q.choice] : q->answer;
-        int last=question_rows(value)-Q_ROWS; if (last<0) last=0;
+        int last=question_rows(value)-question_shown_rows(); if (last<0) last=0;
         if (step>0 && s.offset<last) s.offset++;
         else if (step<0 && s.offset>0) s.offset--;
         else if (s.view==CHOICE && s.q.choice+step>=0 && s.q.choice+step<q->count) {
@@ -2921,6 +3044,12 @@ static void dispatch(action_t a)
         if (s.offset < 0) s.offset = 0;
         break;
     }
+    case A_NEW: {
+        action_t sel = {.kind = A_AGENT};
+        COPY(sel.id, "critter:voice");
+        dispatch(sel);
+        break;
+    }
     case A_AGENT: {
         int i = find(a.id);
         if (i < 0)
@@ -2950,6 +3079,7 @@ static void dispatch(action_t a)
     case A_QUESTION_REVIEW:
     case A_QUESTION_BACK:
     case A_QUESTION_SAY:
+    case A_QUICK:
     case A_CHOICE:
     case A_ANSWER:
         if (!question_view(s.view) || a.revision!=s.q.revision || a.dy!=s.q.index ||
@@ -2957,6 +3087,12 @@ static void dispatch(action_t a)
         if (a.kind==A_QUESTION_SAY && s.q.item[s.q.index].can_text) {
             a.kind=A_VOICE; a.value=4; copy(a.text,sizeof s.q.token,s.q.token);
             ht_gesture_guard(&gesture,ms()); dispatch(a);
+        } else if (a.kind==A_QUICK && s.view==QUESTION && s.q.count==1 && a.value>=0 &&
+                   a.value<s.q.item[s.q.index].count && !s.q.item[s.q.index].multi) {
+            // critter: one tap on a two-option question answers it (no choices/select/review detour).
+            question_item_t *q=&s.q.item[s.q.index];
+            q->draft[0]=q->answer[0]=0; q->selected=1u<<a.value;
+            if (question_answer()) { view(ANSWER_REVIEW); send_answer(); }
         } else if (a.kind==A_QUESTION_CHOICES && s.view==QUESTION) view(CHOICE);
         else if (a.kind==A_QUESTION_BACK) view(s.view==ANSWER_REVIEW && !s.q.item[s.q.index].draft[0] ? CHOICE : QUESTION);
         else if (a.kind==A_CHOICE && s.view==CHOICE && a.value>=0 && a.value<s.q.item[s.q.index].count) {
@@ -2982,6 +3118,18 @@ static void dispatch(action_t a)
             for (int k = 0; k < swarm.n && !t; k++) if (swarm_lead_index(&swarm.tabs[k], a.id) >= 0) t = &swarm.tabs[k];
             if (t) swarm_enter(t, a.id, true);
             else swarm_notice_drop(a.id);
+            break;
+        }
+        ESP_LOGI("habitat", "notice tap: connected=%d id=%s question=%d found=%d qfeature=%d", s.connected, a.id,
+                 a.id[0] ? is_question(a.id) : 0, a.id[0] ? find(a.id) : -2, cable_client_supports(CABLE_FEATURE_QUESTIONS));
+        // critter: a question alert opens the answer screen (question.read -> buttons) instead of asking the
+        // desktop app to open the pane. The stock firmware only ever showed these read-only.
+        if (s.connected && a.id[0] && is_question(a.id) && find(a.id) >= 0 &&
+            cable_client_supports(CABLE_FEATURE_QUESTIONS)) {
+            for (int i = 0; i < s.notice_count; i++)
+                if (!strcmp(s.notice[i].agent_id, a.id)) notice_mark_read(&s.notice[i]);
+            s.active = find(a.id);
+            open_question();
             break;
         }
         if (s.connected && !visit.pending && a.id[0]) {
@@ -4968,6 +5116,7 @@ bool ui_question_show(const char *id, const char *name, const char *machine, con
     // for it. The display wakes so a person glancing over sees it.
     change();
     if (!face) display_wake();
+    COPY(s.auto_question, id);   // opened from the tick once the dial is idle and the pane is listed
     display_unlock();
     return !face;
 }
@@ -4981,6 +5130,8 @@ void ui_question_state(const cJSON *p)
         *error=cJSON_GetObjectItemCaseSensitive(p,"error");
     if (!cJSON_IsString(agent) || !cJSON_IsString(fetch)) return;
     display_lock();
+    if (s.q.loading && !(s.view==QUESTION && !strcmp(agent->valuestring,s.q.agent) && !strcmp(fetch->valuestring,s.q.fetch)))
+        ESP_LOGW("habitat","question.state ignored: view=%d agent_match=%d fetch_match=%d",(int)s.view,!strcmp(agent->valuestring,s.q.agent),!strcmp(fetch->valuestring,s.q.fetch));   // critter diagnostic
     if (s.q.loading && s.view==QUESTION && !strcmp(agent->valuestring,s.q.agent) && !strcmp(fetch->valuestring,s.q.fetch)) {
         s.q.loading=false;
         if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(p,"ok")) && cJSON_IsString(id) &&

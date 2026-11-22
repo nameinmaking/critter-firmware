@@ -60,7 +60,7 @@ static struct {
     bool coasting, touch_brake, touch_down, touch_cancelled, quiet, nap, focus_face, straight_title, muted;
     ht_rect_t pressed_rect;
     int brightness;
-    char voice_target[CABLE_NAME_MAX], voice_engine[12];
+    char voice_target[CABLE_NAME_MAX], voice_engine[12], auto_question[ID_MAX];
     int pattern_mask, pattern_len, view, voice_return, offset, active, count, pressed, hit_count;
     int draft_drag, tab_drag, start_x, start_y, last_x, last_y, tab_count, machine_count, model_count, notice_count, pet_pose;
     uint32_t touch_started, coast_until, character_activity, pet_until, nap_until, last_celebration;
@@ -154,6 +154,9 @@ static unsigned preview_brightness = 100;
 #define ERROR color(HT_THEME_ERROR)
 #define SEL color(HT_THEME_SELECTION)
 #define ESP_LOGI(...) ((void)0)
+#define ESP_LOGW(...) ((void)0)
+// The boot critter: title, five art rows, one typed status line.
+#define BRAND_SCENE() (scene.count==7 && !strcmp(scene.runs[0].text,"Critter Harness"))
 #define EXT_RAM_BSS_ATTR
 static unsigned changes;
 static void change(void) { changes++; }
@@ -228,7 +231,7 @@ swarm_parts = {
     # with the last `swarms` list it keeps beside it
     'swarms_apply': source[source.index('// The last `swarms` list as it came'):source.index('void ui_swarms_replace(')],
 }
-for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'swarm_core', 'swarm_voice_id', 'voice_lead', 'tabs_open', 'workspace_failed', 'tab_request', 'tabs_sync', 'ui_scroll_reportable', 'focus_skin', 'focus_face_for', 'focus_chord', 'focus_put', 'focus_span', 'focus_take', 'focus_rows', 'ui_rows', 'ui_can_display', 'ui_wrap', 'text_in', 'control', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'heading', 'question_view', 'question_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'mix_black', 'face_buddy_disc', 'face_buddy_ring', 'face_buddy_dots', 'face_buddy_avatar', 'render_buddy_empty', 'render_swarm_face', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'swarms_apply', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
+for name in ['copy', 'recap_preview', 'notice_unread', 'notice_was_read', 'notice_forget_read', 'notice_flush_reads', 'notice_mark_read', 'habitat_scene_receipt', 'habitat_scene_presented', 'pane_memory', 'pane_memory_apply', 'dismiss_result', 'activity_text', 'ensure', 'input_cancel', 'view', 'notice_open', 'workspace_index', 'swarm_core', 'swarm_voice_id', 'voice_lead', 'tabs_open', 'workspace_failed', 'tab_request', 'tabs_sync', 'ui_scroll_reportable', 'focus_skin', 'focus_face_for', 'focus_chord', 'focus_put', 'focus_span', 'focus_take', 'focus_rows', 'ui_rows', 'ui_can_display', 'ui_wrap', 'text_in', 'control', 'button', 'plus_button', 'mic_icon', 'home_footer', 'footer_control', 'text', 'center', 'render_brand', 'heading', 'question_view', 'quick_question', 'question_rows', 'question_roomy', 'question_shown_rows', 'question_move', 'question_text', 'render_question', 'render_choices', 'render_answer_review', 'question_answer', 'send_answer', 'make_action', 'character_mood', 'voice_status', 'home_caption_rotates', 'home_caption_tick', 'status_animated', 'status_speed', 'status_wake_ms', 'surface_tick', 'command_face', 'render_workspace_preview', 'question_prompt', 'focus_bell', 'mix_black', 'face_buddy_disc', 'face_buddy_ring', 'face_buddy_dots', 'face_buddy_avatar', 'render_buddy_empty', 'render_swarm_face', 'render_home', 'render_voice', 'render_selection', 'render_form', 'draft_move', 'render_draft', 'render_draft_options', 'swarms_apply', 'ui_swarms_replace', 'ui_workspace_applied', 'ui_land_after_reload']:
     code += swarm_parts[name] if name in swarm_parts else function(name)
 code += function('render_settings') + function('ui_visit_state')
 code += function('ui_project_known') + function('ui_focus_project') + function('ui_apply_pending_focus')
@@ -1048,7 +1051,7 @@ static void pane_memory_checks(const char *dir) {
     fake_ms+=3400; surface_tick(fake_ms); scene_take();
     assert(!active()->tool[0] && title_is("Working"));
     s.nap=true; scene_take(); assert(!title_is("Working")); s.nap=false;
-    s.connected=false; scene_take(); assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter")); s.connected=true;
+    s.connected=false; scene_take(); assert(BRAND_SCENE()); s.connected=true;
     ui_project_emit("a",NULL,"activity","Working",NULL);
     strcpy(active()->name,"hn"); scene_take(); portrait(dir,"short-name-working");
     strcpy(active()->name,"firmware v2");
@@ -2164,7 +2167,7 @@ static void swarm_buddy_checks(const char *dir) {
     // 7c a project with no Buddy: the empty state, and a tap there starts no voice.
     swipe_next();
     assert(!strcmp(sw.lead, "B2") && title_is("docs") && lilac_ring() && buddy_dots() && !avatar());
-    assert(scene_says("No Buddy here yet") && scene_says("Add one in the Critter app."));
+    assert(scene_says("No Buddy here yet") && scene_says("Add one on your computer."));
     FOCUS_PAGE("buddy-7c");
     { int before = starts; tap(fake_ms + 2000, 233, 260); assert(starts == before && s.view == HOME); }
     // Swipe down: back to the PM side.
@@ -2892,19 +2895,19 @@ int main(int argc, char **argv) {
     assert(s.view==TABS && !starts);
     reset(); active()->busy=true; scene_take(); tap(1000,233,41); assert(s.view==AGENTS && !starts);
     reset(); s.connected=false; scene_take(); portrait(dir,"offline");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter") && !s.hit_count);
+    assert(BRAND_SCENE() && !s.hit_count);
     assert(!scene.runs[0].arc && !scene.runs[0].shimmer);
     ht_rect_t brand=ht_run_bounds(&scene.runs[0]);
-    assert(abs(brand.x*2+brand.w-466)<=1 && abs(brand.y*2+brand.h-466)<=1);
+    assert(abs(brand.x*2+brand.w-466)<=1);   // the boot title is centred across; the critter art sits under it
     tap(1000,233,220); assert(!starts);
     surface_tick(1500); assert(!character.motion.running);
     // Handshake alone is not ready: retain the wordmark until the roster lands.
     s.connected=true; s.loading=true; scene_take(); portrait(dir,"connecting");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter") && !s.hit_count);
+    assert(BRAND_SCENE() && !s.hit_count);
     surface_tick(2000); assert(!character.motion.running);
     ui_land_after_reload(); scene_take(); assert(scene.count>1);
     s.view=OTA; scene_take(); portrait(dir,"updating");
-    assert(scene.count==1 && !strcmp(scene.runs[0].text,"Critter") && !s.hit_count);
+    assert(BRAND_SCENE() && !s.hit_count);
     reset(); s.count=0; s.active=-1; scene_take();
     tap(1000,233,220); assert(!starts);
     // A missed utterance keeps the entire creature as the retry target.
@@ -3314,10 +3317,11 @@ int main(int argc, char **argv) {
         fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "b"}); scene_take();
         assert(s.view == VOICE && !strcmp(s.voice_engine, "cursor") && !VOICE_SCENE() && VOICE_BARS() == 7 && !s.pet_next_ms);
         portrait_focus(dir,"focus-voice-bars");
-        // Find in output (no agent): the bars even though the pane is Claude.
+        // Find in output (no agent): critter shows the Claude scene, not the bars.
         reset(); ht_character_select(&character, HT_CHARACTER_FOCUS); strcpy(s.agents[0].engine, "claude");
         fake_ms = 1200; dispatch((action_t){.kind = A_VOICE, .id = "a", .value = 7}); scene_take();
-        assert(s.view == VOICE && !s.voice_engine[0] && !VOICE_SCENE() && VOICE_BARS() == 7 && !s.pet_next_ms);
+        // critter: a turn with no engine falls back to the Claude scenes; the generic bars never show.
+        assert(s.view == VOICE && !s.voice_engine[0] && VOICE_SCENE());
         // Sending to Claude: the post box scene animates on its own step; quiet holds it.
         const ht_pet_scene_t *ss = ht_pets[0].sending_scene;
         assert(ss);

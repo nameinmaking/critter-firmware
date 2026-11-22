@@ -49,6 +49,8 @@ static bool cable_link_send(uint8_t type,const uint8_t *bytes,size_t n) {
     assert(type==CABLE_TYPE_JSON&&n<sizeof wire);
     sends++;memcpy(wire,bytes,n);wire[n]=0;wire_size=n;return !fail_send;
 }
+// cable_client.c sends through cable_transport_send, which picks USB or BLE; with no BLE link up it is USB.
+static bool cable_transport_send(uint8_t type,const uint8_t *bytes,size_t n) {return cable_link_send(type,bytes,n);}
 static void audio_client_copy_upload_id(char *out,size_t n) {snprintf(out,n,"upload-1234");}
 static void audio_client_copy_carry(char *out,size_t n) {snprintf(out,n,"carry-1234");}
 static void audio_client_copy_form(char *out,size_t n,unsigned *revision) {

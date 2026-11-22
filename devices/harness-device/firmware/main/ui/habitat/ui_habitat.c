@@ -6058,10 +6058,22 @@ void ui_cable_toast(const char *message)
     ui_show_error("Critter", message);
 }
 
+// The passkey text last put on the message screen, so the end of pairing can close exactly that
+// screen (and not a toast that replaced it, which shares the "Critter" title).
+static char s_passkey_shown[sizeof s.message];
+
 void ui_set_ble_pairing(bool active, const char *passkey_message)
 {
     display_lock();
     s.ble_pairing_active = active;
+    if (!active) {
+        // Pairing is over, either way: if the passkey is still what the dial shows, go back to the
+        // face (the sessions view once the link comes up) instead of leaving the code on screen.
+        if (s_passkey_shown[0] && s.view == MESSAGE && !strcmp(s.message, s_passkey_shown)) view(HOME);
+        s_passkey_shown[0] = 0;
+    } else if (passkey_message) {
+        COPY(s_passkey_shown, passkey_message);
+    }
     // A live voice turn blocks view() from changing the screen at all (see view()'s own guard
     // above s.ble_pairing_active's) — force it closed first so the passkey is not silently
     // swallowed. Pairing only ever starts from a fresh BLE connection, never mid-voice-turn by

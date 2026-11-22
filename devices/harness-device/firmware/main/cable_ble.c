@@ -83,6 +83,25 @@ static atomic_bool s_link_trusted;
 
 #define BOND_MAX_PEERS 8 // this dial only ever bonds to the one bridge it's paired with; generous headroom for re-pairing without deleting the old entry first
 
+static void diag_log_bonds(const char *when, const struct ble_gap_conn_desc *desc)
+{
+    ble_addr_t peers[BOND_MAX_PEERS];
+    int count = 0;
+    int rc = ble_store_util_bonded_peers(peers, &count, BOND_MAX_PEERS);
+    if (desc) {
+        const uint8_t *o = desc->peer_ota_addr.val, *i = desc->peer_id_addr.val;
+        ESP_LOGI(TAG, "DIAG %s: peer ota=%02x:%02x:%02x:%02x:%02x:%02x/t%u id=%02x:%02x:%02x:%02x:%02x:%02x/t%u enc=%d auth=%d bonded=%d key=%u",
+                 when, o[5], o[4], o[3], o[2], o[1], o[0], desc->peer_ota_addr.type,
+                 i[5], i[4], i[3], i[2], i[1], i[0], desc->peer_id_addr.type,
+                 desc->sec_state.encrypted, desc->sec_state.authenticated, desc->sec_state.bonded, desc->sec_state.key_size);
+    }
+    ESP_LOGI(TAG, "DIAG %s: %d bond(s) on file (rc=%d)", when, count, rc);
+    for (int k = 0; k < count; k++) {
+        const uint8_t *v = peers[k].val;
+        ESP_LOGI(TAG, "DIAG   bond %d: %02x:%02x:%02x:%02x:%02x:%02x/t%u", k, v[5], v[4], v[3], v[2], v[1], v[0], peers[k].type);
+    }
+}
+
 static bool peer_already_bonded(const ble_addr_t *peer_id_addr)
 {
     ble_addr_t peers[BOND_MAX_PEERS];
@@ -117,6 +136,8 @@ static void ble_frame_cb(uint8_t version, uint8_t type, const uint8_t *payload, 
 static atomic_uint s_decoder_gen;
 static void ble_rx_bytes(uint32_t gen, const uint8_t *data, size_t len)
 {
+    ESP_LOGI(TAG, "DIAG rx %u bytes tag=%u decoder_gen=%u conn_gen=%u trusted=%d", (unsigned)len, (unsigned)gen,
+             (unsigned)atomic_load(&s_decoder_gen), (unsigned)atomic_load(&s_conn_gen), (int)s_link_trusted);
     if (gen != atomic_load(&s_decoder_gen)) {
         cable_decoder_reset(&s_decoder);
         atomic_store(&s_decoder_gen, gen);
@@ -141,6 +162,7 @@ static void ble_frame_cb(uint8_t version, uint8_t type, const uint8_t *payload, 
         ESP_LOGW(TAG, "dropping a type-%u frame over BLE — bulk transfers stay USB-only", (unsigned)type);
         return;
     }
+    ESP_LOGI(TAG, "DIAG frame type=%u len=%u current=%d", (unsigned)type, (unsigned)payload_len, (int)cable_ble_frame_is_current());
     s_cb(version, type, payload, payload_len, ctx);
 }
 
@@ -160,6 +182,7 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble
     }
     // Handled on the ble_rx task, not here on the NimBLE host task, tagged with the connection it
     // arrived on. The host task handles a link's writes before its DISCONNECT, so this is exact.
+    ESP_LOGI(TAG, "DIAG gatt write %u bytes conn=%u", (unsigned)out_len, (unsigned)conn_handle);
     ble_rx_push(atomic_load(&s_conn_gen), chunk, out_len);
     return 0;
 }
@@ -293,6 +316,7 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
                 s_peer_has_bond = peer_already_bonded(&desc.peer_id_addr);
+                diag_log_bonds("connect", &desc);
             } else {
                 s_peer_has_bond = false;
             }
@@ -300,7 +324,17 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             if (rc != 0) {
                 ESP_LOGW(TAG, "ble_gap_security_initiate failed; rc=%d", rc);
             }
-            if (s_link_timeout_timer) esp_timer_start_once(s_link_timeout_timer, BLE_LINK_TRUST_TIMEOUT_US);
+            // A bonded Mac can resume encryption so fast that NimBLE reports ENC_CHANGE *before*
+            // this CONNECT (seen on hardware: contract V15). So trust is read from the link's actual
+            // security state here, not assumed false, and the ENC_CHANGE that came first left it to us.
+            if (ble_gap_conn_find(s_conn_handle, &desc) == 0 && desc.sec_state.encrypted &&
+                desc.sec_state.authenticated && desc.sec_state.key_size == 16) {
+                ESP_LOGI(TAG, "link already encrypted and authenticated at connect — trusted");
+                s_link_trusted = true;
+                maybe_activate();
+            } else if (s_link_timeout_timer) {
+                esp_timer_start_once(s_link_timeout_timer, BLE_LINK_TRUST_TIMEOUT_US);
+            }
         } else {
             ble_advertise(); // a failed connection attempt leaves us not advertising — resume it
         }
@@ -408,7 +442,12 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             // is left connected but untrusted rather than torn down on the spot — cable_ble_send's
             // own trust gate and the RX characteristic's WRITE_AUTHEN flag already make such a
             // link harmless, and BLE_LINK_TRUST_TIMEOUT_US bounds how long it can occupy the slot.
-            ble_bond_state_t bond = ble_policy_classify_bond(s_peer_has_bond, true);
+            // Looked up fresh, not from s_peer_has_bond: this ENC_CHANGE may arrive before the
+            // CONNECT that would have set it (contract V15).
+            bool has_bond = false;
+            struct ble_gap_conn_desc bd;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &bd) == 0) has_bond = peer_already_bonded(&bd.peer_id_addr);
+            ble_bond_state_t bond = ble_policy_classify_bond(has_bond, true);
             if (bond == BOND_STALE) {
                 ESP_LOGW(TAG, "a peer resumed without pairing but this dial has no bond for it (enc status=%d)", event->enc_change.status);
                 ui_cable_toast("BLE: a device claims a bond I don't have — re-pair it");
@@ -418,9 +457,17 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         } else if (event->enc_change.status != 0) {
             ESP_LOGW(TAG, "pairing's encryption step failed; status=%d", event->enc_change.status);
         }
+        {
+            struct ble_gap_conn_desc d;
+            ESP_LOGI(TAG, "DIAG enc_change status=%d fresh_pairing=%d", event->enc_change.status, (int)fresh_pairing_just_ran);
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &d) == 0) diag_log_bonds("enc_change", &d);
+        }
         if (event->enc_change.status == 0) {
             struct ble_gap_conn_desc desc;
-            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0 &&
+            // Only for the connection CONNECT has already adopted; if CONNECT has not run yet, it
+            // reads this same security state itself when it does.
+            if (event->enc_change.conn_handle == s_conn_handle &&
+                ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0 &&
                 desc.sec_state.encrypted && desc.sec_state.authenticated) {
                 s_link_trusted = true;
                 if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);

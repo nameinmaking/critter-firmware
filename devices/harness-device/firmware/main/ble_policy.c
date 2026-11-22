@@ -26,3 +26,12 @@ bool ble_policy_should_activate(bool trusted, bool subscribed, int64_t us_since_
     if (!trusted || !subscribed) return false;
     return us_since_usb_rx < 0 || us_since_usb_rx > BLE_POLICY_USB_QUIET_US;
 }
+
+#define BLE_POLICY_RETRY_WAIT_MS 5
+#define BLE_POLICY_RETRY_ATTEMPTS 200 // ~1 s in total: long enough to drain, short enough to never wedge a sender
+
+int ble_policy_notify_retry_ms(bool out_of_buffers, int attempt)
+{
+    if (!out_of_buffers || attempt >= BLE_POLICY_RETRY_ATTEMPTS) return -1;
+    return BLE_POLICY_RETRY_WAIT_MS;
+}

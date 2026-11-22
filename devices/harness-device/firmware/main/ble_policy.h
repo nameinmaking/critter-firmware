@@ -34,3 +34,9 @@ ble_battery_wire_t ble_battery_for_wire(int raw_pct, bool charging);
 // us_since_usb_rx: microseconds since USB last delivered a frame, or < 0 if it never has; a USB
 // session heard from within the last 15 s (the dial's own silence timeout) keeps the link.
 bool ble_policy_should_activate(bool trusted, bool subscribed, int64_t us_since_usb_rx);
+
+// How long cable_ble_send waits before retrying a notification that failed. NimBLE reports a full
+// buffer pool as "no memory"; buffers free up as the radio drains, so that one is worth waiting
+// for, briefly. Returns the wait in ms, or -1 to give up (the send then reports "not connected").
+// attempt counts from 0.
+int ble_policy_notify_retry_ms(bool out_of_buffers, int attempt);

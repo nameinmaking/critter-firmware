@@ -23,6 +23,13 @@ int main(void)
     CHECK(!ble_policy_should_activate(false, true, -1));
     CHECK(!ble_policy_should_activate(true, false, -1));
 
+    // A notify that hit "out of buffers" waits 5 ms and retries, for about a second, then gives up;
+    // any other failure gives up at once.
+    CHECK(ble_policy_notify_retry_ms(true, 0) == 5);
+    CHECK(ble_policy_notify_retry_ms(true, 199) == 5);
+    CHECK(ble_policy_notify_retry_ms(true, 200) == -1);
+    CHECK(ble_policy_notify_retry_ms(false, 0) == -1);
+
     printf("ble_policy: %s\n", fails ? "FAILED" : "ok");
     return fails ? 1 : 0;
 }

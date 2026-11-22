@@ -24,6 +24,7 @@ set(BOARD_SRCS
     "cable_link.c"
     "cable_session_io.c"
     "ble_policy.c"
+    "ble_rx.c"
     "cable_ble.c"
     "cable_client.c"
     "cable_machines.c"

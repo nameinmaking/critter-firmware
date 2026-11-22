@@ -55,6 +55,13 @@ CONFIG_BT_NIMBLE_NVS_PERSIST=y
 # in a boot loop. Moving NimBLE's own buffers to the 8MB PSRAM frees the internal heap for everything
 # that must stay internal (DMA, task stacks).
 CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+# Big frames (agents.list, a long reply) go out as many notifications back to back. The default
+# pool of 12 x 256-byte buffers ran dry part-way and the rest of the frame was dropped. 48 blocks is
+# 12KB, in PSRAM per the line above; cable_ble_send also waits and retries when the pool is empty.
+CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=48
+# Ask for the largest ATT MTU, so a frame needs fewer, larger notifications. The central may accept
+# less (macOS typically settles near 185-517); cable_ble_send chunks to whatever was negotiated.
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
 
 # --- LWIP: room for commander WS + HTTP client + DNS concurrently ---
 CONFIG_LWIP_MAX_SOCKETS=16

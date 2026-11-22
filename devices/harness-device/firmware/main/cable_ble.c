@@ -1,10 +1,12 @@
 #include "cable_ble.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "ble_policy.h"
+#include "ble_rx.h"
 #include "cable_client.h"    // cable_client_us_since_usb_rx — for ble_policy_should_activate
 #include "cable_session_io.h" // cable_session_io_run — serializes on_disconnect against on_frame/session_tick
 #include "esp_log.h"
@@ -45,14 +47,13 @@ static void           *s_ctx;
 static void          (*s_on_disconnect)(void);
 static void          (*s_on_ready)(void);
 // True once on_ready has fired for the current connection; cleared on CONNECT and DISCONNECT.
-static bool           s_link_active;
+static atomic_bool    s_link_active;
 static cable_decoder_t s_decoder; // this transport's own decoder instance — see cable_session_io.h
 
 static uint8_t own_addr_type;
 static uint16_t s_tx_val_handle;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool     s_tx_subscribed;
-static esp_timer_handle_t s_tick_timer;
 static esp_timer_handle_t s_link_timeout_timer;
 
 // Bonding/pairing state for the one connection this dial ever has at a time (undirected
@@ -92,18 +93,29 @@ static bool peer_already_bonded(const ble_addr_t *peer_id_addr)
     return false;
 }
 
-// Every 250ms, matching cable_client.c's own session_task hello-loop cadence — NimBLE is
-// event-driven and has no polling loop of its own to piggyback a periodic tick on, the way
-// cable_link.c's reader task does.
-#define BLE_TICK_PERIOD_US (250 * 1000)
-
 static void maybe_activate(void); // below, beside the GAP handler that also calls it
 
-static void tick_timer_cb(void *arg)
+// Runs on the ble_rx task every ~250 ms (see ble_rx.h for why not on the esp_timer task).
+static void ble_tick(void)
 {
-    (void)arg;
     maybe_activate();
     if (s_tick) s_tick(s_ctx);
+}
+
+static void ble_frame_cb(uint8_t version, uint8_t type, const uint8_t *payload, size_t payload_len, void *ctx);
+
+// Runs on the ble_rx task: the frame handlers (and the replies they send) never run on the NimBLE
+// host task.
+static void ble_rx_bytes(const uint8_t *data, size_t len)
+{
+    cable_decoder_feed(&s_decoder, data, len, ble_frame_cb, s_ctx);
+}
+
+// Runs on the ble_rx task after every connect/disconnect (ble_rx_reset): a half-received frame
+// from one connection must not bleed into the next.
+static void ble_rx_decoder_reset(void)
+{
+    cable_decoder_reset(&s_decoder);
 }
 
 static void link_timeout_cb(void *arg)
@@ -132,14 +144,15 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble
     (void)attr_handle;
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return 0; // the TX characteristic is notify-only; nothing reads or writes it from the central side
-    uint8_t chunk[256];
+    // 512 = the largest attribute value ATT allows, so no legal write is ever too big for this.
+    uint8_t chunk[512];
     uint16_t out_len = 0;
     int rc = ble_hs_mbuf_to_flat(ctxt->om, chunk, sizeof(chunk), &out_len);
     if (rc != 0) {
         ESP_LOGW(TAG, "oversized or malformed GATT write (rc=%d) — dropped", rc);
         return 0; // never fails the GATT operation itself; the frame decoder resyncs past bad bytes
     }
-    cable_decoder_feed(&s_decoder, chunk, out_len, ble_frame_cb, s_ctx);
+    ble_rx_push(chunk, out_len); // handled on the ble_rx task, not here on the NimBLE host task
     return 0;
 }
 
@@ -223,9 +236,11 @@ static void run_on_ready(void *arg)
 // of trust and subscription comes second makes BLE the active transport (see cable_ble.h).
 static void maybe_activate(void)
 {
-    if (s_link_active || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    // Called from both the NimBLE host task (GAP events) and the ble_rx task (tick); the exchange
+    // makes sure on_ready fires once per connection.
+    if (atomic_load(&s_link_active) || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
     if (!ble_policy_should_activate(s_link_trusted, s_tx_subscribed, cable_client_us_since_usb_rx())) return;
-    s_link_active = true;
+    if (atomic_exchange(&s_link_active, true)) return;
     ESP_LOGI(TAG, "BLE link trusted and subscribed — making it the active transport");
     cable_session_io_run(run_on_ready, NULL);
 }
@@ -246,8 +261,8 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             s_conn_handle = event->connect.conn_handle;
             s_pairing_active = false;
             s_link_trusted = false;
-            s_link_active = false;
-            cable_decoder_reset(&s_decoder); // a half-received frame from a prior connection must not bleed into this one
+            atomic_store(&s_link_active, false);
+            ble_rx_reset(); // a half-received frame from a prior connection must not bleed into this one
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
                 s_peer_has_bond = peer_already_bonded(&desc.peer_id_addr);
@@ -269,9 +284,9 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_tx_subscribed = false;
         s_link_trusted = false;
-        s_link_active = false;
+        atomic_store(&s_link_active, false);
         if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
-        cable_decoder_reset(&s_decoder); // whatever was mid-frame when the link dropped is not valid for the next connection either
+        ble_rx_reset(); // whatever was mid-frame when the link dropped is not valid for the next connection either
         if (s_pairing_active) ui_set_ble_pairing(false, NULL); // a disconnect mid-pairing still clears the guard
         s_pairing_active = false;
         cable_session_io_run(run_on_disconnect, NULL); // tells cable_client.c BLE is no longer the active transport, serialized against on_frame
@@ -473,14 +488,9 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
 
     ble_store_config_init();
 
-    const esp_timer_create_args_t tick_args = {
-        .callback = tick_timer_cb,
-        .name = "cable_ble_tick",
-    };
-    if (esp_timer_create(&tick_args, &s_tick_timer) == ESP_OK) {
-        esp_timer_start_periodic(s_tick_timer, BLE_TICK_PERIOD_US);
-    } else {
-        ESP_LOGW(TAG, "no periodic tick timer — BLE sessions will not notice an idle host as promptly");
+    if (!ble_rx_start(ble_rx_bytes, ble_tick, ble_rx_decoder_reset)) {
+        ESP_LOGE(TAG, "BLE receive task did not start — BLE disabled, the dial still works over USB");
+        return false;
     }
 
     const esp_timer_create_args_t timeout_args = {
@@ -533,9 +543,20 @@ bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)
     for (size_t off = 0; off < (size_t)n; off += chunk_cap) {
         size_t len = (size_t)n - off;
         if (len > chunk_cap) len = chunk_cap;
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(s_tx_frame + off, (uint16_t)len);
-        if (!om) { ok = false; break; } // no memory for this notification right now — same "not connected" treatment as any other send failure
-        int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
+        // Out of notification buffers is normal for a big frame (agents.list, a long reply): they
+        // free up as the radio drains, so wait briefly and retry this chunk instead of dropping the
+        // rest of the frame. Never called on the NimBLE host task (see ble_rx.h), so waiting here
+        // cannot starve the task that frees them. Any other failure gives up at once.
+        int rc = 0;
+        for (int attempt = 0;; attempt++) {
+            if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) { rc = BLE_HS_ENOTCONN; break; }
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(s_tx_frame + off, (uint16_t)len);
+            rc = om ? ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om) : BLE_HS_ENOMEM;
+            if (rc == 0) break;
+            int wait_ms = ble_policy_notify_retry_ms(rc == BLE_HS_ENOMEM, attempt);
+            if (wait_ms < 0) break;
+            vTaskDelay(pdMS_TO_TICKS(wait_ms) ? pdMS_TO_TICKS(wait_ms) : 1);
+        }
         if (rc != 0) { ok = false; break; }
     }
 

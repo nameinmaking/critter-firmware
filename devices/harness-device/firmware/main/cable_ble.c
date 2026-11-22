@@ -567,7 +567,8 @@ static uint8_t s_tx_frame[CABLE_MAX_FRAME];
 bool cable_ble_frame_is_current(void)
 {
     return s_conn_handle != BLE_HS_CONN_HANDLE_NONE &&
-           ble_policy_link_still_current(atomic_load(&s_decoder_gen), atomic_load(&s_conn_gen), s_link_trusted, true);
+           ble_policy_link_still_current(atomic_load(&s_decoder_gen), atomic_load(&s_conn_gen), s_link_trusted,
+                                         atomic_load(&s_tx_subscribed));
 }
 
 bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)

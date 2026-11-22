@@ -24,6 +24,22 @@ Bytes on either characteristic are the same framed messages USB carries (see
 [`main/cable_frame.h`](../main/cable_frame.h)) — chunked to fit a GATT write/notify payload, not a
 different encoding.
 
+## Which link the dial talks on
+
+The dial advertises as **`Critter`**. It always says `hello` first, and it replies on whichever link
+is active. A BLE link becomes the active one as soon as it is paired (passkey-authenticated and
+encrypted) **and** the host has subscribed to the TX characteristic; the dial then says `hello` on it
+right away. Earlier firmware waited for the host to speak first over BLE, while the host waited for
+`hello`, so a BLE session never started. One exception keeps a cable from being hijacked: if USB
+delivered a frame in the last 15 seconds, BLE waits until USB has been quiet that long. A frame
+arriving over USB always makes USB the active link again.
+
+Received BLE bytes and the transport's 250 ms tick are handled on a dedicated `ble_rx` task
+(`main/ble_rx.c`), not on the NimBLE host task or the system timer task, so a reply that has to wait
+for free notification buffers never blocks the stack that frees them. Large frames are sent as many
+notifications sized to the negotiated MTU (the dial asks for 512); when the buffer pool is empty the
+send waits briefly and retries rather than dropping the rest of the frame.
+
 ## Pairing, from the owner's side
 
 The first time a given host connects, the device has no bond for it yet, so pairing runs
@@ -33,7 +49,9 @@ is standard OS-level Bluetooth pairing, not anything the firmware or the bridge 
 itself. The device requires this authenticated exchange — it refuses a "Just Works" pairing that
 skips the code — and requires LE Secure Connections, the strongest pairing mode this hardware
 supports. Once paired, every later connection is automatic — no code, no prompt — and the bond
-survives a reboot, until the bond is lost on one side (see below).
+survives a reboot, until the bond is lost on one side (see below). Both sides also exchange identity keys while pairing, so
+the bond keeps working when the host changes its Bluetooth address (macOS does so about every 15
+minutes).
 
 While the code is on screen, nothing else normally overwrites it: an unrelated notice (a voice
 error, an agent event) arriving mid-pairing is dropped rather than replacing the code the owner is

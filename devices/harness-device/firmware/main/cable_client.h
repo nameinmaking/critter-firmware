@@ -104,6 +104,10 @@ bool cable_client_start(void);
 // Whether `welcome` has been seen and the session is still believed to be live.
 bool cable_client_is_connected(void);
 
+// Microseconds since USB last delivered a frame, or -1 if it never has. Safe from any task.
+// cable_ble.c uses it so a BLE link never takes over a USB session heard from in the last 15 s.
+int64_t cable_client_us_since_usb_rx(void);
+
 // The machine's display name, as `welcome` gave it ("" until then). The dial shows the computer it is
 // plugged into, and there is exactly one — the machine picker this firmware used to carry existed for a
 // backend that is no longer part of the design.

@@ -27,8 +27,15 @@ code = r'''
 #include <stdatomic.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#define ESP_LOGW(tag, ...) ((void)(tag), dropped_ble++)
+static const char *TAG = "test";
 static atomic_bool s_active_is_ble;
+static atomic_uint_least32_t s_last_usb_rx_ms;
+static atomic_bool s_usb_ever_rx;
 static const int s_ble_ctx;
+static bool ble_trusted;
+static unsigned dropped_ble;
+static bool cable_ble_frame_is_current(void) { return ble_trusted; }
 static int64_t s_last_rx_us, clock_us = 123;
 static uint32_t s_bad,s_unknown;
 static unsigned handled, alloc_calls, live, fail_at, fw_slices, pet_slices;
@@ -140,8 +147,18 @@ int main(void) {
     on_frame(1,9,NULL,0,NULL);assert(s_unknown==1);
     on_frame(1,CABLE_TYPE_FW,NULL,0,NULL);assert(fw_slices==1);
     on_frame(1,CABLE_TYPE_PET,NULL,0,NULL);assert(pet_slices==1 && fw_slices==1 && !live);
-    // Every frame above came over USB, so USB is the transport replies go out on.
-    assert(!s_active_is_ble);
+    // Every frame above came over USB: USB is the active transport and its receive time is recorded.
+    assert(!s_active_is_ble && s_usb_ever_rx && s_last_usb_rx_ms == (uint32_t)(clock_us/1000));
+    // A frame from a trusted BLE link makes BLE the active transport and is handled.
+    const char *ping = "{\"t\":\"ping\"}";
+    before = handled; ble_trusted = true; clock_us += 1000000;
+    on_frame(1,CABLE_TYPE_JSON,(const uint8_t *)ping,strlen(ping),(void *)&s_ble_ctx);
+    assert(handled == before + 1 && s_active_is_ble && s_last_usb_rx_ms != (uint32_t)(clock_us/1000));
+    // One that was still in flight when the link dropped is dropped: it neither switches the
+    // transport nor reaches the session.
+    atomic_store(&s_active_is_ble, false); ble_trusted = false; before = handled;
+    on_frame(1,CABLE_TYPE_JSON,(const uint8_t *)ping,strlen(ping),(void *)&s_ble_ctx);
+    assert(handled == before && !s_active_is_ble && dropped_ble == 1);
     puts("USB JSON: real cJSON, guarded/truncated frames, 100000 mutations, every allocation failure PASS");
 }
 '''

@@ -1,10 +1,14 @@
 #include "cable_ble.h"
 
 #include <inttypes.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "ble_policy.h"
+#include "ble_rx.h"
+#include "cable_client.h"    // cable_client_us_since_usb_rx — for ble_policy_should_activate
 #include "cable_session_io.h" // cable_session_io_run — serializes on_disconnect against on_frame/session_tick
 #include "esp_log.h"
 #include "esp_random.h"
@@ -42,13 +46,19 @@ static cable_frame_cb  s_cb;
 static cable_tick_cb   s_tick;
 static void           *s_ctx;
 static void          (*s_on_disconnect)(void);
+static void          (*s_on_ready)(void);
+// True once on_ready has fired for the current connection; cleared on CONNECT and DISCONNECT.
+// Bumped on every connect and disconnect (never 0 once a connection has happened). Work that
+// started for one connection carries its generation and stops if it changed: see
+// ble_policy_link_still_current. s_active_gen is the generation that is the active transport.
+static atomic_uint    s_conn_gen;
+static atomic_uint    s_active_gen;
 static cable_decoder_t s_decoder; // this transport's own decoder instance — see cable_session_io.h
 
 static uint8_t own_addr_type;
 static uint16_t s_tx_val_handle;
-static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static bool     s_tx_subscribed;
-static esp_timer_handle_t s_tick_timer;
+static _Atomic uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static atomic_bool s_tx_subscribed;
 static esp_timer_handle_t s_link_timeout_timer;
 
 // Bonding/pairing state for the one connection this dial ever has at a time (undirected
@@ -63,7 +73,7 @@ static bool s_pairing_active;  // true from PASSKEY_ACTION until ENC_CHANGE/DISC
 // the RX characteristic's own WRITE_AUTHEN enforcement: the two are separate layers (inbound ATT
 // permission vs. outbound application gate) and neither substitutes for the other. Cleared on
 // every CONNECT and DISCONNECT.
-static bool s_link_trusted;
+static atomic_bool s_link_trusted;
 
 // A connection that never becomes trusted (ignores the security request, stalls mid-pairing, or
 // completes only a Just Works encryption) would otherwise hold the single connection slot forever
@@ -88,15 +98,30 @@ static bool peer_already_bonded(const ble_addr_t *peer_id_addr)
     return false;
 }
 
-// Every 250ms, matching cable_client.c's own session_task hello-loop cadence — NimBLE is
-// event-driven and has no polling loop of its own to piggyback a periodic tick on, the way
-// cable_link.c's reader task does.
-#define BLE_TICK_PERIOD_US (250 * 1000)
+static void maybe_activate(void); // below, beside the GAP handler that also calls it
 
-static void tick_timer_cb(void *arg)
+// Runs on the ble_rx task every ~250 ms (see ble_rx.h for why not on the esp_timer task).
+static void ble_tick(void)
 {
-    (void)arg;
+    maybe_activate();
     if (s_tick) s_tick(s_ctx);
+}
+
+static void ble_frame_cb(uint8_t version, uint8_t type, const uint8_t *payload, size_t payload_len, void *ctx);
+
+// Runs on the ble_rx task: the frame handlers (and the replies they send) never run on the NimBLE
+// host task.
+// `gen` is the connection generation the write arrived on (tagged in gatt_access_cb). A new
+// generation resets the decoder, so a half-received frame from one connection never bleeds into
+// the next; s_decoder_gen then says which connection the frames being decoded belong to.
+static atomic_uint s_decoder_gen;
+static void ble_rx_bytes(uint32_t gen, const uint8_t *data, size_t len)
+{
+    if (gen != atomic_load(&s_decoder_gen)) {
+        cable_decoder_reset(&s_decoder);
+        atomic_store(&s_decoder_gen, gen);
+    }
+    cable_decoder_feed(&s_decoder, data, len, ble_frame_cb, s_ctx);
 }
 
 static void link_timeout_cb(void *arg)
@@ -125,14 +150,17 @@ static int gatt_access_cb(uint16_t conn_handle, uint16_t attr_handle, struct ble
     (void)attr_handle;
     (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return 0; // the TX characteristic is notify-only; nothing reads or writes it from the central side
-    uint8_t chunk[256];
+    // 512 = the largest attribute value ATT allows, so no legal write is ever too big for this.
+    uint8_t chunk[512];
     uint16_t out_len = 0;
     int rc = ble_hs_mbuf_to_flat(ctxt->om, chunk, sizeof(chunk), &out_len);
     if (rc != 0) {
         ESP_LOGW(TAG, "oversized or malformed GATT write (rc=%d) — dropped", rc);
         return 0; // never fails the GATT operation itself; the frame decoder resyncs past bad bytes
     }
-    cable_decoder_feed(&s_decoder, chunk, out_len, ble_frame_cb, s_ctx);
+    // Handled on the ble_rx task, not here on the NimBLE host task, tagged with the connection it
+    // arrived on. The host task handles a link's writes before its DISCONNECT, so this is exact.
+    ble_rx_push(atomic_load(&s_conn_gen), chunk, out_len);
     return 0;
 }
 
@@ -175,7 +203,7 @@ static void ble_advertise(void)
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
     // The name does NOT go here: flags (3B) + a complete 128-bit UUID list (2+16=18B) already
-    // total 21 of the legacy advertising packet's 31-byte budget, and adding "harness-dial" (2+12)
+    // total 21 of the legacy advertising packet's 31-byte budget, and adding the name
     // would overflow it — ble_gap_adv_set_fields would then fail outright and this dial would never
     // advertise at all. The name goes in the scan response instead, a second, separate 31-byte
     // packet a central only gets if it actively scans, which costs this packet nothing.
@@ -206,6 +234,45 @@ static void ble_advertise(void)
     }
 }
 
+static unsigned next_conn_gen(void)
+{
+    unsigned gen = atomic_fetch_add(&s_conn_gen, 1) + 1;
+    if (gen == 0) gen = atomic_fetch_add(&s_conn_gen, 1) + 1; // skip 0 ("never connected") on wrap
+    return gen;
+}
+
+// Runs under the session lock. A disconnect bumps the generation before it queues its own
+// run_on_disconnect, so either this sees the new generation and does nothing, or it runs first and
+// run_on_disconnect then switches the dial back to USB. BLE can never stay active with no link.
+static void run_on_ready(void *arg)
+{
+    unsigned gen = (unsigned)(uintptr_t)arg;
+    if (!ble_policy_link_still_current(gen, atomic_load(&s_conn_gen), s_link_trusted, s_tx_subscribed)) {
+        ESP_LOGI(TAG, "BLE link changed before it could become active — staying on the current transport");
+        // Let a later SUBSCRIBE / ENC_CHANGE / tick try again for this same connection (it may only
+        // have unsubscribed for a moment). A newer generation is left alone.
+        unsigned expected = gen;
+        atomic_compare_exchange_strong(&s_active_gen, &expected, 0u);
+        return;
+    }
+    if (s_on_ready) s_on_ready();
+}
+
+// Called on SUBSCRIBE, on the ENC_CHANGE that makes the link trusted, and on every tick: whichever
+// of trust and subscription comes second makes BLE the active transport (see cable_ble.h).
+static void maybe_activate(void)
+{
+    // Called from both the NimBLE host task (GAP events) and the ble_rx task (tick); the
+    // compare-exchange makes sure on_ready fires once per connection.
+    unsigned gen = atomic_load(&s_conn_gen);
+    unsigned active = atomic_load(&s_active_gen);
+    if (active == gen || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    if (!ble_policy_should_activate(s_link_trusted, s_tx_subscribed, cable_client_us_since_usb_rx())) return;
+    if (!atomic_compare_exchange_strong(&s_active_gen, &active, gen)) return;
+    ESP_LOGI(TAG, "BLE link trusted and subscribed — making it the active transport");
+    cable_session_io_run(run_on_ready, (void *)(uintptr_t)gen);
+}
+
 static void run_on_disconnect(void *arg)
 {
     (void)arg;
@@ -222,7 +289,7 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             s_conn_handle = event->connect.conn_handle;
             s_pairing_active = false;
             s_link_trusted = false;
-            cable_decoder_reset(&s_decoder); // a half-received frame from a prior connection must not bleed into this one
+            next_conn_gen();
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
                 s_peer_has_bond = peer_already_bonded(&desc.peer_id_addr);
@@ -233,7 +300,17 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             if (rc != 0) {
                 ESP_LOGW(TAG, "ble_gap_security_initiate failed; rc=%d", rc);
             }
-            if (s_link_timeout_timer) esp_timer_start_once(s_link_timeout_timer, BLE_LINK_TRUST_TIMEOUT_US);
+            // A bonded Mac can resume encryption so fast that NimBLE reports ENC_CHANGE *before*
+            // this CONNECT (seen on hardware: contract V15). So trust is read from the link's actual
+            // security state here, not assumed false, and the ENC_CHANGE that came first left it to us.
+            if (ble_gap_conn_find(s_conn_handle, &desc) == 0 && desc.sec_state.encrypted &&
+                desc.sec_state.authenticated && desc.sec_state.key_size == 16) {
+                ESP_LOGI(TAG, "link already encrypted and authenticated at connect — trusted");
+                s_link_trusted = true;
+                maybe_activate();
+            } else if (s_link_timeout_timer) {
+                esp_timer_start_once(s_link_timeout_timer, BLE_LINK_TRUST_TIMEOUT_US);
+            }
         } else {
             ble_advertise(); // a failed connection attempt leaves us not advertising — resume it
         }
@@ -244,8 +321,8 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_tx_subscribed = false;
         s_link_trusted = false;
+        next_conn_gen(); // before run_on_disconnect is queued: see run_on_ready
         if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
-        cable_decoder_reset(&s_decoder); // whatever was mid-frame when the link dropped is not valid for the next connection either
         if (s_pairing_active) ui_set_ble_pairing(false, NULL); // a disconnect mid-pairing still clears the guard
         s_pairing_active = false;
         cable_session_io_run(run_on_disconnect, NULL); // tells cable_client.c BLE is no longer the active transport, serialized against on_frame
@@ -269,6 +346,12 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == s_tx_val_handle) {
             s_tx_subscribed = event->subscribe.cur_notify;
+            if (!event->subscribe.cur_notify && atomic_exchange(&s_active_gen, 0u) != 0u) {
+                // The central stopped listening: nothing the dial says over BLE can arrive any more, so
+                // hand replies back to USB until it subscribes again (which activates BLE afresh).
+                cable_session_io_run(run_on_disconnect, NULL);
+            }
+            maybe_activate();
         }
         return 0;
 
@@ -287,7 +370,14 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
             ESP_LOGW(TAG, "peer re-pairing despite an existing bond — deleting the old bond and retrying");
             ui_cable_toast("BLE: re-pairing a device I already knew — confirm the new code");
-            ble_gap_unpair(&desc.peer_id_addr);
+            // Delete the bond from the store only. ble_gap_unpair() would also terminate this very
+            // connection (and refuses outright while advertising), so the retry below would run on
+            // a link that is going down; this is what ESP-IDF's bleprph example does.
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+            // The stale half is gone, so this peer no longer has a bond on file. Without this, the
+            // PASSKEY_ACTION the retry leads to classifies the fresh pairing as BOND_STALE and
+            // terminates it — re-pairing after "Forget this device" could never succeed.
+            s_peer_has_bond = false;
         }
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
@@ -328,7 +418,12 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             // is left connected but untrusted rather than torn down on the spot — cable_ble_send's
             // own trust gate and the RX characteristic's WRITE_AUTHEN flag already make such a
             // link harmless, and BLE_LINK_TRUST_TIMEOUT_US bounds how long it can occupy the slot.
-            ble_bond_state_t bond = ble_policy_classify_bond(s_peer_has_bond, true);
+            // Looked up fresh, not from s_peer_has_bond: this ENC_CHANGE may arrive before the
+            // CONNECT that would have set it (contract V15).
+            bool has_bond = false;
+            struct ble_gap_conn_desc bd;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &bd) == 0) has_bond = peer_already_bonded(&bd.peer_id_addr);
+            ble_bond_state_t bond = ble_policy_classify_bond(has_bond, true);
             if (bond == BOND_STALE) {
                 ESP_LOGW(TAG, "a peer resumed without pairing but this dial has no bond for it (enc status=%d)", event->enc_change.status);
                 ui_cable_toast("BLE: a device claims a bond I don't have — re-pair it");
@@ -340,10 +435,14 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         }
         if (event->enc_change.status == 0) {
             struct ble_gap_conn_desc desc;
-            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0 &&
+            // Only for the connection CONNECT has already adopted; if CONNECT has not run yet, it
+            // reads this same security state itself when it does.
+            if (event->enc_change.conn_handle == s_conn_handle &&
+                ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0 &&
                 desc.sec_state.encrypted && desc.sec_state.authenticated) {
                 s_link_trusted = true;
                 if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
+                maybe_activate();
             }
         }
         return 0;
@@ -381,12 +480,14 @@ static void host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void))
+bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void),
+                     void (*on_ready)(void))
 {
     s_cb = cb;
     s_tick = tick;
     s_ctx = ctx;
     s_on_disconnect = on_disconnect;
+    s_on_ready = on_ready;
     cable_decoder_init(&s_decoder);
 
     esp_err_t err = nimble_port_init();
@@ -412,8 +513,11 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_sc_only = 1;
     ble_hs_cfg.sm_sec_lvl = 4;
-    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
-    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
+    // ID as well as ENC: the identity key (IRK) lets each side recognise the other after it changes
+    // its resolvable private address. macOS rotates its address about every 15 minutes; without the
+    // Mac's IRK the dial would see a stranger and fail to find the bond.
+    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -429,21 +533,16 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
         return false;
     }
 
-    rc = ble_svc_gap_device_name_set("harness-dial");
+    rc = ble_svc_gap_device_name_set("Critter");
     if (rc != 0) {
         ESP_LOGW(TAG, "ble_svc_gap_device_name_set failed; rc=%d", rc);
     }
 
     ble_store_config_init();
 
-    const esp_timer_create_args_t tick_args = {
-        .callback = tick_timer_cb,
-        .name = "cable_ble_tick",
-    };
-    if (esp_timer_create(&tick_args, &s_tick_timer) == ESP_OK) {
-        esp_timer_start_periodic(s_tick_timer, BLE_TICK_PERIOD_US);
-    } else {
-        ESP_LOGW(TAG, "no periodic tick timer — BLE sessions will not notice an idle host as promptly");
+    if (!ble_rx_start(ble_rx_bytes, ble_tick)) {
+        ESP_LOGE(TAG, "BLE receive task did not start — BLE disabled, the dial still works over USB");
+        return false;
     }
 
     const esp_timer_create_args_t timeout_args = {
@@ -465,6 +564,13 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
 static SemaphoreHandle_t s_tx_lock;
 static uint8_t s_tx_frame[CABLE_MAX_FRAME];
 
+bool cable_ble_frame_is_current(void)
+{
+    return s_conn_handle != BLE_HS_CONN_HANDLE_NONE &&
+           ble_policy_link_still_current(atomic_load(&s_decoder_gen), atomic_load(&s_conn_gen), s_link_trusted,
+                                         atomic_load(&s_tx_subscribed));
+}
+
 bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)
 {
     if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE || !s_tx_subscribed || !s_link_trusted) return false;
@@ -474,6 +580,16 @@ bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)
         if (!s_tx_lock) return false;
     }
     xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+
+    // Another sender may have held the lock for a while: decide again, now, which connection this
+    // frame is for, and send every chunk only while that same connection is current and trusted.
+    const unsigned gen = atomic_load(&s_conn_gen);
+    const uint16_t conn = s_conn_handle;
+    if (conn == BLE_HS_CONN_HANDLE_NONE ||
+        !ble_policy_link_still_current(gen, atomic_load(&s_conn_gen), s_link_trusted, s_tx_subscribed)) {
+        xSemaphoreGive(s_tx_lock);
+        return false;
+    }
 
     int n = cable_frame_encode(type, payload, payload_len, s_tx_frame, sizeof(s_tx_frame));
     if (n < 0) {
@@ -488,7 +604,7 @@ bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)
     // bytes (which is most of them — hello alone is) has to go out as several notifications. The
     // decoder on both ends resyncs across chunk boundaries the same way it already does across
     // separate GATT writes, so chunk boundaries need not align with frame boundaries.
-    uint16_t mtu = ble_att_mtu(s_conn_handle);
+    uint16_t mtu = ble_att_mtu(conn);
     if (mtu <= 3) mtu = BLE_ATT_MTU_DFLT;
     const size_t chunk_cap = (size_t)mtu - 3;
 
@@ -496,9 +612,23 @@ bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len)
     for (size_t off = 0; off < (size_t)n; off += chunk_cap) {
         size_t len = (size_t)n - off;
         if (len > chunk_cap) len = chunk_cap;
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(s_tx_frame + off, (uint16_t)len);
-        if (!om) { ok = false; break; } // no memory for this notification right now — same "not connected" treatment as any other send failure
-        int rc = ble_gatts_notify_custom(s_conn_handle, s_tx_val_handle, om);
+        // Out of notification buffers is normal for a big frame (agents.list, a long reply): they
+        // free up as the radio drains, so wait briefly and retry this chunk instead of dropping the
+        // rest of the frame. Never called on the NimBLE host task (see ble_rx.h), so waiting here
+        // cannot starve the task that frees them. Any other failure gives up at once.
+        int rc = 0;
+        for (int attempt = 0;; attempt++) {
+            if (!ble_policy_link_still_current(gen, atomic_load(&s_conn_gen), s_link_trusted, s_tx_subscribed)) {
+                rc = BLE_HS_ENOTCONN;
+                break;
+            }
+            struct os_mbuf *om = ble_hs_mbuf_from_flat(s_tx_frame + off, (uint16_t)len);
+            rc = om ? ble_gatts_notify_custom(conn, s_tx_val_handle, om) : BLE_HS_ENOMEM;
+            if (rc == 0) break;
+            int wait_ms = ble_policy_notify_retry_ms(rc == BLE_HS_ENOMEM, attempt);
+            if (wait_ms < 0) break;
+            vTaskDelay(pdMS_TO_TICKS(wait_ms) ? pdMS_TO_TICKS(wait_ms) : 1);
+        }
         if (rc != 0) { ok = false; break; }
     }
 

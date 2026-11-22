@@ -155,8 +155,11 @@ static void cable_session_io_tick(void *ctx) { (void)ctx; io_tick(io_ctx); }
 // host test has no BLE stack, so it always declines to start, exactly like a board with BLE compiled out.
 static const int s_ble_ctx;
 static void cable_transport_ble_disconnected(void) {}
-static bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void)) {
-    (void)cb; (void)tick; (void)ctx; (void)on_disconnect; return false;
+static void cable_transport_ble_ready(void) {}
+static TaskHandle_t s_hello_task;
+static bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void),
+                            void (*on_ready)(void)) {
+    (void)cb; (void)tick; (void)ctx; (void)on_disconnect; (void)on_ready; return false;
 }
 '''
 code += function(link, 'reader_task')

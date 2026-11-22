@@ -3,6 +3,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef enum { BLE_DISCONNECT_CENTRAL, BLE_DISCONNECT_PERIPHERAL, BLE_DISCONNECT_LINK_LOSS } ble_disconnect_reason_t;
 
@@ -25,3 +26,11 @@ ble_bond_state_t ble_policy_classify_bond(bool peer_has_bond, bool peer_claims_b
 // is meaningless.
 typedef struct { bool has_pct; int pct; bool charging; } ble_battery_wire_t;
 ble_battery_wire_t ble_battery_for_wire(int raw_pct, bool charging);
+
+// Whether a BLE link should become the dial's active transport now. The dial's protocol is
+// dial-speaks-first (hello), and replies go out on whichever transport is active, so a BLE link
+// must be made active explicitly — nothing arrives over it until the dial has said hello there.
+// trusted: passkey-authenticated and encrypted. subscribed: the central enabled TX notifications.
+// us_since_usb_rx: microseconds since USB last delivered a frame, or < 0 if it never has; a USB
+// session heard from within the last 15 s (the dial's own silence timeout) keeps the link.
+bool ble_policy_should_activate(bool trusted, bool subscribed, int64_t us_since_usb_rx);

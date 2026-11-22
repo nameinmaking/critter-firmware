@@ -40,7 +40,13 @@
 // such frame arriving over BLE is logged and dropped before `cb` ever sees it.
 //
 // Returns false if NimBLE failed to initialize (logged; the dial still works over USB).
-bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void));
+//
+// `on_ready`, if non-NULL, is called (also through cable_session_io_run) once the link is trusted,
+// the central has subscribed to TX, and ble_policy_should_activate allows BLE to take over — the
+// caller makes BLE the active transport and says hello on it. Re-checked on every tick until it
+// fires, so a BLE link that arrived while USB was busy takes over once USB has been quiet 15 s.
+bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void),
+                     void (*on_ready)(void));
 
 // Frame `payload` and notify it to the subscribed central. Same contract as cable_link_send: a
 // false return means no central is connected and subscribed right now — a normal state for this

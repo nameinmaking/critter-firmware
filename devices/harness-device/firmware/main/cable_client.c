@@ -85,6 +85,15 @@ static int64_t           s_last_rx_us;
 // handling an inbound frame (UI, audio) — so it is atomic rather than a plain bool despite every
 // WRITE to it happening under cable_session_io's lock (via on_frame or cable_ble_disconnected).
 static atomic_bool        s_active_is_ble;
+// When USB last delivered a frame, in ms since boot (32-bit so it is read atomically from the
+// NimBLE host task; wraps after ~49 days, which the unsigned subtraction below handles), and
+// whether it ever has. Read by cable_ble.c through cable_client_us_since_usb_rx to decide whether
+// a newly trusted BLE link may take over (ble_policy_should_activate).
+static atomic_uint_least32_t s_last_usb_rx_ms;
+static atomic_bool           s_usb_ever_rx;
+// The session (hello) task, so a newly active BLE link can ask for a hello right away instead of
+// waiting out HELLO_ALONE_MS.
+static TaskHandle_t          s_hello_task;
 static const int         s_ble_ctx; // address used as a sentinel only; the value is never read
 
 // Cleared via cable_session_io_run (see cable_client_start) whenever BLE disconnects, so a reply
@@ -94,6 +103,23 @@ static const int         s_ble_ctx; // address used as a sentinel only; the valu
 static void cable_transport_ble_disconnected(void)
 {
     atomic_store(&s_active_is_ble, false);
+}
+
+// Run through cable_session_io_run (serialized against on_frame) once cable_ble.c decides the BLE
+// link is trusted, subscribed and allowed to take over (ble_policy_should_activate). Without this
+// the dial would keep saying hello over USB forever: the bridge sends nothing over BLE until it
+// has heard hello, so last-frame-wins alone never selects BLE.
+static void cable_transport_ble_ready(void)
+{
+    atomic_store(&s_active_is_ble, true);
+    if (s_hello_task) xTaskNotifyGive(s_hello_task);
+}
+
+int64_t cable_client_us_since_usb_rx(void)
+{
+    if (!atomic_load(&s_usb_ever_rx)) return -1;
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    return (int64_t)(uint32_t)(now_ms - (uint32_t)atomic_load(&s_last_usb_rx_ms)) * 1000;
 }
 static char              s_machine_name[CABLE_NAME_MAX];
 static uint32_t          s_bad, s_unknown;
@@ -1648,6 +1674,10 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
     // back out on (cable_transport_send). This runs on cable_session_io's single session task, same
     // as the rest of this function — see cable_session_io.h for why that matters here.
     atomic_store(&s_active_is_ble, ctx == &s_ble_ctx);
+    if (ctx != &s_ble_ctx) {
+        atomic_store(&s_last_usb_rx_ms, (uint_least32_t)(esp_timer_get_time() / 1000));
+        atomic_store(&s_usb_ever_rx, true);
+    }
     if (type == CABLE_TYPE_FW) {
         s_last_rx_us = esp_timer_get_time();
         // Straight to flash, on this task. That is deliberate and it is what the credit window is sized
@@ -1709,7 +1739,8 @@ static void session_task(void *arg)
             next_hello_us = now + (int64_t)(s_session ? HELLO_SESSION_MS : HELLO_ALONE_MS) * 1000;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(250));
+        // A notification (cable_transport_ble_ready) means a link just became active: say hello now.
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250))) next_hello_us = 0;
     }
 }
 
@@ -1744,10 +1775,11 @@ bool cable_client_start(void)
     // A BLE start failure is not fatal to the session: the dial still works over USB (see
     // cable_ble_start's own doc comment). s_ble_ctx is a distinct, never-dereferenced sentinel
     // pointer purely so on_frame can tell which transport delivered a given frame.
-    if (!cable_ble_start(cable_session_io_feed, cable_session_io_tick, (void *)&s_ble_ctx, cable_transport_ble_disconnected)) {
+    if (!cable_ble_start(cable_session_io_feed, cable_session_io_tick, (void *)&s_ble_ctx, cable_transport_ble_disconnected, cable_transport_ble_ready)) {
         ESP_LOGW(TAG, "BLE transport did not start — the dial still works over USB");
     }
     s_started = true;
+    s_hello_task = hello_task;
     xTaskNotifyGive(hello_task);
     ESP_LOGI(TAG, "cable client started (fw %s, proto %d)", cable_fw_version(), CABLE_PROTO_VERSION);
     return true;

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "ble_policy.h"
+#include "cable_client.h"    // cable_client_us_since_usb_rx — for ble_policy_should_activate
 #include "cable_session_io.h" // cable_session_io_run — serializes on_disconnect against on_frame/session_tick
 #include "esp_log.h"
 #include "esp_random.h"
@@ -42,6 +43,9 @@ static cable_frame_cb  s_cb;
 static cable_tick_cb   s_tick;
 static void           *s_ctx;
 static void          (*s_on_disconnect)(void);
+static void          (*s_on_ready)(void);
+// True once on_ready has fired for the current connection; cleared on CONNECT and DISCONNECT.
+static bool           s_link_active;
 static cable_decoder_t s_decoder; // this transport's own decoder instance — see cable_session_io.h
 
 static uint8_t own_addr_type;
@@ -93,9 +97,12 @@ static bool peer_already_bonded(const ble_addr_t *peer_id_addr)
 // cable_link.c's reader task does.
 #define BLE_TICK_PERIOD_US (250 * 1000)
 
+static void maybe_activate(void); // below, beside the GAP handler that also calls it
+
 static void tick_timer_cb(void *arg)
 {
     (void)arg;
+    maybe_activate();
     if (s_tick) s_tick(s_ctx);
 }
 
@@ -175,7 +182,7 @@ static void ble_advertise(void)
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
     // The name does NOT go here: flags (3B) + a complete 128-bit UUID list (2+16=18B) already
-    // total 21 of the legacy advertising packet's 31-byte budget, and adding "harness-dial" (2+12)
+    // total 21 of the legacy advertising packet's 31-byte budget, and adding the name
     // would overflow it — ble_gap_adv_set_fields would then fail outright and this dial would never
     // advertise at all. The name goes in the scan response instead, a second, separate 31-byte
     // packet a central only gets if it actively scans, which costs this packet nothing.
@@ -206,6 +213,23 @@ static void ble_advertise(void)
     }
 }
 
+static void run_on_ready(void *arg)
+{
+    (void)arg;
+    if (s_on_ready) s_on_ready();
+}
+
+// Called on SUBSCRIBE, on the ENC_CHANGE that makes the link trusted, and on every tick: whichever
+// of trust and subscription comes second makes BLE the active transport (see cable_ble.h).
+static void maybe_activate(void)
+{
+    if (s_link_active || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) return;
+    if (!ble_policy_should_activate(s_link_trusted, s_tx_subscribed, cable_client_us_since_usb_rx())) return;
+    s_link_active = true;
+    ESP_LOGI(TAG, "BLE link trusted and subscribed — making it the active transport");
+    cable_session_io_run(run_on_ready, NULL);
+}
+
 static void run_on_disconnect(void *arg)
 {
     (void)arg;
@@ -222,6 +246,7 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             s_conn_handle = event->connect.conn_handle;
             s_pairing_active = false;
             s_link_trusted = false;
+            s_link_active = false;
             cable_decoder_reset(&s_decoder); // a half-received frame from a prior connection must not bleed into this one
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(s_conn_handle, &desc) == 0) {
@@ -244,6 +269,7 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_tx_subscribed = false;
         s_link_trusted = false;
+        s_link_active = false;
         if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
         cable_decoder_reset(&s_decoder); // whatever was mid-frame when the link dropped is not valid for the next connection either
         if (s_pairing_active) ui_set_ble_pairing(false, NULL); // a disconnect mid-pairing still clears the guard
@@ -269,6 +295,7 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == s_tx_val_handle) {
             s_tx_subscribed = event->subscribe.cur_notify;
+            maybe_activate();
         }
         return 0;
 
@@ -288,6 +315,10 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGW(TAG, "peer re-pairing despite an existing bond — deleting the old bond and retrying");
             ui_cable_toast("BLE: re-pairing a device I already knew — confirm the new code");
             ble_gap_unpair(&desc.peer_id_addr);
+            // The stale half is gone, so this peer no longer has a bond on file. Without this, the
+            // PASSKEY_ACTION the retry leads to classifies the fresh pairing as BOND_STALE and
+            // terminates it — re-pairing after "Forget this device" could never succeed.
+            s_peer_has_bond = false;
         }
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
@@ -344,6 +375,7 @@ int cable_ble_gap_event(struct ble_gap_event *event, void *arg)
                 desc.sec_state.encrypted && desc.sec_state.authenticated) {
                 s_link_trusted = true;
                 if (s_link_timeout_timer) esp_timer_stop(s_link_timeout_timer);
+                maybe_activate();
             }
         }
         return 0;
@@ -381,12 +413,14 @@ static void host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
-bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void))
+bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on_disconnect)(void),
+                     void (*on_ready)(void))
 {
     s_cb = cb;
     s_tick = tick;
     s_ctx = ctx;
     s_on_disconnect = on_disconnect;
+    s_on_ready = on_ready;
     cable_decoder_init(&s_decoder);
 
     esp_err_t err = nimble_port_init();
@@ -412,8 +446,11 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
     ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_sc_only = 1;
     ble_hs_cfg.sm_sec_lvl = 4;
-    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
-    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC;
+    // ID as well as ENC: the identity key (IRK) lets each side recognise the other after it changes
+    // its resolvable private address. macOS rotates its address about every 15 minutes; without the
+    // Mac's IRK the dial would see a stranger and fail to find the bond.
+    ble_hs_cfg.sm_our_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist |= BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -429,7 +466,7 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
         return false;
     }
 
-    rc = ble_svc_gap_device_name_set("harness-dial");
+    rc = ble_svc_gap_device_name_set("Critter");
     if (rc != 0) {
         ESP_LOGW(TAG, "ble_svc_gap_device_name_set failed; rc=%d", rc);
     }

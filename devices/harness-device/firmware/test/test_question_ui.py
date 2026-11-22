@@ -117,7 +117,7 @@ static bool ui_can_display(const char *t,const ht_font_t *f,int w,int l){return 
 static int ui_wrap(ht_scene_t *s,int x,int y,int w,int n,int skip,const ht_font_t *f,uint16_t fg,const char *t){return ht_wrap(s,x,y,w,n,skip,f,fg,t);}
 '''
 for name in ['notice_sync_view','copy','color','control','button','quick_question','text','center','heading','question_view','question_rows',
-             'question_text','render_question','render_choices','render_answer_review',
+             'question_roomy', 'question_shown_rows', 'question_text','render_question','render_choices','render_answer_review',
              'open_question','question_answer','question_move','send_answer',
              'question_load','ui_question_show','ui_question_state','ui_answer_receipt','ui_question_close','ui_focus_project','ui_voice_question']:
     code += function(name)
@@ -245,6 +245,11 @@ int main(int argc,char **argv) {
     // does wake the display, and it still counts in the bell until it is answered.
     reset(false);view(HOME);wakes=0;notices=0;
     assert(ui_question_show("b","Other","M2","q-b2",NULL) && s.view==HOME && wakes==1 && notices==1 && !read_now);
+    // The question is queued to open by itself once the dial is idle. Opening it another way (an
+    // inbox tap) uses that up: otherwise "later" would just bring the same question straight back.
+    assert(!strcmp(s.auto_question,"b"));
+    s.connected=true;b_known=true;s.active=1;open_question();assert(s.view==QUESTION && !s.auto_question[0]);
+    reset(false);view(HOME);
     // The pane on the face already shows its question: still filed, but read at once, no wake, no beep.
     wakes=0;notices=0;face_agent="b";
     assert(!ui_question_show("b","Other","M2","q-b3",NULL) && wakes==0 && notices==1 && read_now==1);

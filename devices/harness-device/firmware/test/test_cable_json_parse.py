@@ -24,8 +24,11 @@ code = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
 #include <unistd.h>
+static atomic_bool s_active_is_ble;
+static const int s_ble_ctx;
 static int64_t s_last_rx_us, clock_us = 123;
 static uint32_t s_bad,s_unknown;
 static unsigned handled, alloc_calls, live, fail_at, fw_slices, pet_slices;
@@ -137,6 +140,8 @@ int main(void) {
     on_frame(1,9,NULL,0,NULL);assert(s_unknown==1);
     on_frame(1,CABLE_TYPE_FW,NULL,0,NULL);assert(fw_slices==1);
     on_frame(1,CABLE_TYPE_PET,NULL,0,NULL);assert(pet_slices==1 && fw_slices==1 && !live);
+    // Every frame above came over USB, so USB is the transport replies go out on.
+    assert(!s_active_is_ble);
     puts("USB JSON: real cJSON, guarded/truncated frames, 100000 mutations, every allocation failure PASS");
 }
 '''

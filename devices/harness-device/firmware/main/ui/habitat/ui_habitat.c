@@ -1953,10 +1953,20 @@ static bool quick_question(void)
     question_item_t *q = &s.q.item[s.q.index];
     return !q->multi && !q->can_text && q->count == 2;
 }
+// critter: a quick (two-button) question has no "question 1 / 1" line, so its text starts higher and
+// gets a fourth row. question_move pages by the same count, or a drag would overshoot and snap back.
+static bool question_roomy(void)
+{
+    return s.view == QUESTION && quick_question();
+}
+static int question_shown_rows(void)
+{
+    return question_roomy() ? 4 : Q_ROWS;
+}
 static void question_text(ht_scene_t *f, const char *value)
 {
-    bool roomy = s.view == QUESTION && quick_question();   // no "question 1 / 1" line: the text starts higher and gets a fourth row
-    int shown = roomy ? 4 : Q_ROWS, top = roomy ? 112 : 146;
+    bool roomy = question_roomy();
+    int shown = question_shown_rows(), top = roomy ? 112 : 146;
     int rows = question_rows(value), last = rows > shown ? rows - shown : 0;
     if (s.offset > last) s.offset = last;
     if (s.offset < 0) s.offset = 0;
@@ -2901,6 +2911,9 @@ static action_t make_action(hit_t h)
 static void open_question(void)
 {
     if (!s.connected || !active()) return;
+    // critter: opening this pane's question by any path (inbox tap, visit) uses up its pending
+    // auto-open, or surface_tick would reopen it right after "later".
+    if (!strcmp(s.auto_question, active()->id)) s.auto_question[0] = 0;
     if (!cable_client_supports(CABLE_FEATURE_QUESTIONS)) {
         action_t open={.kind=A_DESKTOP}; COPY(open.id,active()->id);
         queue(open);
@@ -2938,7 +2951,7 @@ static void question_move(int delta)
         int step=s.q.drag>0 ? 1 : -1; s.q.drag-=step*40;
         question_item_t *q=&s.q.item[s.q.index];
         const char *value=s.view==QUESTION ? q->prompt : s.view==CHOICE ? q->options[s.q.choice] : q->answer;
-        int last=question_rows(value)-Q_ROWS; if (last<0) last=0;
+        int last=question_rows(value)-question_shown_rows(); if (last<0) last=0;
         if (step>0 && s.offset<last) s.offset++;
         else if (step<0 && s.offset>0) s.offset--;
         else if (s.view==CHOICE && s.q.choice+step>=0 && s.q.choice+step<q->count) {

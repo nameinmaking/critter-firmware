@@ -1673,6 +1673,13 @@ static void on_frame(uint8_t version, uint8_t type, const uint8_t *payload, size
     // Last-frame-wins: whichever transport most recently delivered a frame is the one a reply goes
     // back out on (cable_transport_send). This runs on cable_session_io's single session task, same
     // as the rest of this function — see cable_session_io.h for why that matters here.
+    // A BLE frame can still be on its way through ble_rx when the link drops. The disconnect clears
+    // the link before it queues cable_transport_ble_disconnected under this same lock, so checking
+    // here means such a frame is dropped instead of switching the dial back to a link that is gone.
+    if (ctx == &s_ble_ctx && !cable_ble_link_trusted()) {
+        ESP_LOGW(TAG, "dropping a BLE frame (type %u) that arrived after the link went down", (unsigned)type);
+        return;
+    }
     atomic_store(&s_active_is_ble, ctx == &s_ble_ctx);
     if (ctx != &s_ble_ctx) {
         atomic_store(&s_last_usb_rx_ms, (uint_least32_t)(esp_timer_get_time() / 1000));

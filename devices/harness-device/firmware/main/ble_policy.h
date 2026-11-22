@@ -40,3 +40,9 @@ bool ble_policy_should_activate(bool trusted, bool subscribed, int64_t us_since_
 // for, briefly. Returns the wait in ms, or -1 to give up (the send then reports "not connected").
 // attempt counts from 0.
 int ble_policy_notify_retry_ms(bool out_of_buffers, int attempt);
+
+// True iff work started for connection generation `started_gen` may continue: that connection is
+// still the current one (generation unchanged; 0 means "never connected"), trusted and subscribed.
+// cable_ble.c bumps the generation on every connect and disconnect, so a stale activation or the
+// tail of a frame can never reach a later central, even one NimBLE gave the same handle number.
+bool ble_policy_link_still_current(unsigned started_gen, unsigned current_gen, bool trusted, bool subscribed);

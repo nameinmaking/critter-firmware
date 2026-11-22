@@ -35,3 +35,8 @@ int ble_policy_notify_retry_ms(bool out_of_buffers, int attempt)
     if (!out_of_buffers || attempt >= BLE_POLICY_RETRY_ATTEMPTS) return -1;
     return BLE_POLICY_RETRY_WAIT_MS;
 }
+
+bool ble_policy_link_still_current(unsigned started_gen, unsigned current_gen, bool trusted, bool subscribed)
+{
+    return started_gen != 0 && started_gen == current_gen && trusted && subscribed;
+}

@@ -51,4 +51,9 @@ bool cable_ble_start(cable_frame_cb cb, cable_tick_cb tick, void *ctx, void (*on
 // Frame `payload` and notify it to the subscribed central. Same contract as cable_link_send: a
 // false return means no central is connected and subscribed right now — a normal state for this
 // transport, not an error. Callers should treat it as "not connected", never retry in a tight loop.
+// True while a BLE central is connected and passkey-authenticated. cable_client.c checks it under the
+// session lock before acting on a BLE frame: a frame read just before a disconnect must not make BLE
+// the active transport again once the link is gone.
+bool cable_ble_link_trusted(void);
+
 bool cable_ble_send(uint8_t type, const uint8_t *payload, size_t payload_len);

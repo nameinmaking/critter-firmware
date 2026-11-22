@@ -1,5 +1,7 @@
 #include "ble_rx.h"
 
+#include "cable_frame.h"
+
 #include <stdatomic.h>
 
 #include "esp_heap_caps.h"
@@ -11,7 +13,9 @@
 
 static const char *TAG = "ble_rx";
 
-#define BLE_RX_BUFFER_BYTES 4096
+// Room for two largest frames: writes arrive without response, so this buffer is the only slack
+// while ble_rx is busy in a frame handler or a send retry. It lives in PSRAM (see ble_rx_start).
+#define BLE_RX_BUFFER_BYTES (2 * CABLE_MAX_FRAME)
 #define BLE_RX_STACK        6144   // matches cable_link.c's READER_STACK: both run the same frame handlers
 #define BLE_RX_PRIORITY     5      // matches cable_link.c's reader task
 #define BLE_RX_TICK_MS      250
@@ -22,6 +26,7 @@ static void (*s_on_bytes)(const uint8_t *, size_t);
 static void (*s_on_tick)(void);
 static void (*s_on_reset)(void);
 static atomic_bool s_reset_pending;
+static atomic_uint s_dropped_writes;
 
 static void drain_for_reset(void)
 {
@@ -84,12 +89,15 @@ bool ble_rx_start(void (*on_bytes)(const uint8_t *, size_t), void (*on_tick)(voi
 bool ble_rx_push(const uint8_t *data, size_t len)
 {
     if (!s_stream) return false;
-    size_t sent = xStreamBufferSend(s_stream, data, len, 0);
-    if (sent != len) {
-        ESP_LOGW(TAG, "BLE receive buffer full — dropped %u of %u bytes", (unsigned)(len - sent), (unsigned)len);
+    // Drop a write whole rather than queue part of it: a torn write corrupts the frame it belongs to
+    // and the one after it. Only the NimBLE host task pushes, so the space cannot shrink in between.
+    if (xStreamBufferSpacesAvailable(s_stream) < len) {
+        unsigned drops = atomic_fetch_add(&s_dropped_writes, 1) + 1;
+        ESP_LOGW(TAG, "BLE receive buffer full — dropped a %u-byte write (%u writes dropped since boot)",
+                 (unsigned)len, drops);
         return false;
     }
-    return true;
+    return xStreamBufferSend(s_stream, data, len, 0) == len;
 }
 
 void ble_rx_reset(void)

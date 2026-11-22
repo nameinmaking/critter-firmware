@@ -30,6 +30,16 @@ int main(void)
     CHECK(ble_policy_notify_retry_ms(true, 200) == -1);
     CHECK(ble_policy_notify_retry_ms(false, 0) == -1);
 
+    // Work started for one connection (an activation, or the rest of a frame) only continues while
+    // that same connection is still up, trusted and subscribed. A disconnect or a new connection
+    // bumps the generation, even when NimBLE reuses the same handle number.
+    CHECK(ble_policy_link_still_current(7, 7, true, true));
+    CHECK(!ble_policy_link_still_current(7, 8, true, true));
+    CHECK(!ble_policy_link_still_current(7, 9, true, true));
+    CHECK(!ble_policy_link_still_current(7, 7, false, true));
+    CHECK(!ble_policy_link_still_current(7, 7, true, false));
+    CHECK(!ble_policy_link_still_current(0, 0, true, true)); // generation 0 = no connection yet
+
     printf("ble_policy: %s\n", fails ? "FAILED" : "ok");
     return fails ? 1 : 0;
 }
